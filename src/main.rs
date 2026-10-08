@@ -24,8 +24,8 @@ use serde::Serialize;
 
 use rfd::FileDialog;
 
-static PLOT_DIM_X: i32 = 1920; //450 //1920
-static PLOT_DIM_Y: i32 = 1080; //340 //1080
+static PLOT_DIM_X: i32 = 3750; //450 //1920
+static PLOT_DIM_Y: i32 = 6000; //340 //1080
 
 static PLOT_COLOR_1: RGBColor = BLUE;
 static PLOT_COLOR_2: RGBColor = BLACK;
@@ -59,6 +59,7 @@ struct Peak {
 
 
 fn main() {
+
     plotter("C:\\ProgramData\\EMC32\\Customer Configuration\\SR_Conf_v5_1_beta\\Tests\\tt\\TL81000 (2024) AN L1 9 kHz").unwrap();
     plotter("C:\\ProgramData\\EMC32\\Customer Configuration\\SR_Conf_v5_1_beta\\Tests\\tt\\DUT1 MPP Rod Antenna 9k PKCAV").unwrap();
 }
@@ -255,9 +256,10 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
     y_min = ((y_min - 20.0)/10.0).round() * 10.0;
     y_max = ((y_max + 10.0)/10.0).round() * 10.0;
 
+
     let bg_color = WHITE;
     let secondary_color = BLACK;
-    let font_style = ("sans-serif", 30).into_font();
+    let font_style = ("sans-serif", 75).into_font();
 
     fs::create_dir_all(file_path.to_string() + "/!raw_graph")?;
 
@@ -269,11 +271,12 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
         let specific_path = file_path.to_string() + &format!("/{}/{}_{}.svg", "!raw_graph", &testname, &order[idx]);
         let root = SVGBackend::new(&specific_path, (PLOT_DIM_X.try_into()?, PLOT_DIM_Y.try_into()?)).into_drawing_area();
         root.fill(&bg_color)?;
+        let (root_graph, root_table) = root.split_vertically(50.percent_height());
 
-        let mut chart = ChartBuilder::on(&root)
-            .caption(format!("{} {}", testname, &order[idx]), ("sans-serif", 30).into_font().color(&secondary_color))
-            .x_label_area_size(75)
-            .y_label_area_size(100)
+        let mut chart = ChartBuilder::on(&root_graph)
+            .caption(format!("{} {}", testname, &order[idx]), font_style.color(&secondary_color))
+            .x_label_area_size(150)
+            .y_label_area_size(180)
             .margin(50)
             .build_cartesian_2d((f_min .. f_max).log_scale(), y_min..y_max)?;
 
@@ -331,7 +334,7 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
         let (px_right, _)        = plotting_area.map_coordinate(&(f_max, y_min));
 
         // px_left/px_right and py_bottom are already in root pixel space
-        let tick_len = 30i32;
+        let tick_len = 60i32;
         root.draw(&PathElement::new(
             vec![(px_left, py_bottom), (px_left, py_bottom + tick_len)],
             BLACK,
@@ -342,12 +345,13 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
         ))?;
 
         //now the tick labels
-        let style = TextStyle::from(font_style.clone()).pos(Pos::new(HPos::Center, VPos::Top));
+        let style_left = TextStyle::from(font_style.clone()).pos(Pos::new(HPos::Left, VPos::Top));
+        let style_right = TextStyle::from(font_style.clone()).pos(Pos::new(HPos::Right, VPos::Top));
 
         let gap = 4i32;
 
-        root.draw_text(&f_min.to_string(), &style, (px_left, py_bottom + tick_len + gap))?;
-        root.draw_text(&f_max.to_string(), &style, (px_right, py_bottom + tick_len + gap))?;
+        root.draw_text(&f_min.to_string(), &style_left, (px_left, py_bottom + tick_len + gap))?;
+        root.draw_text(&f_max.to_string(), &style_right, (px_right, py_bottom + tick_len + gap))?;
 
         let mut y = y_min;
         while y < y_max {
@@ -369,24 +373,109 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
 
 
 
-        let mut peaks: Vec<Peak> = vec![];
+        //let mut peaks: Vec<Peak> = vec![];
+
+
+        /*
+        root_table.draw(
+            &Rectangle::new(
+                [(0, 100), (250, 150)],
+                BLACK)
+        )?;
+        root_table.draw(
+            &Rectangle::new(
+                [(250, 100), (500, 150)],
+                BLACK)
+        )?;
+        */
+
+        let mut table_counter = 0;
+
 
         for (lid, lim) in limits.iter().enumerate() { //for each limit
             let limit_name = &lim.name;
             let limit = &lim.values;
             if limit_name.contains(order[idx]) { //check if the limit_name should be plotted
-                for i in 0..(limit.len()/2) {
+
+                let mut row_counter = 0;
+
+                for i in 0..(limit.len()/2) {//loop over all sub-limit pairs
                     if limit[2*i+1].0 <= f_min {continue;} //dont plot sub-limits that end before the graph has even begun
                     if limit[2*i].0 >= f_max {break;} //dont plot sub-limits that start where the graph is already over
                     let peak = peak_search(&emi, lim, 2*i, 2*i+1);
                     //plot the peaks above the limits
                     if let Some(peak) = peak {
 
+                        //two tabels per grid-row
+                        let table_row_in_grid = table_counter / 2;
+                        let table_column_in_grid = table_counter % 2;
+
+
+                        let offset_x = 200;
+                        let offset_y = 0;
+
+                        let column_count = 3;
+                        let ind_cell_width = (PLOT_DIM_X - offset_x * 2)/(2 * column_count);
+                        let ind_cell_height = 100;
+
+                        let style = ("sans-serif", 70).into_font();
+
+                        let table_offset_x = offset_x + (table_column_in_grid * (100 + column_count * ind_cell_width));
+                        let table_offset_y = offset_y + (table_row_in_grid * (200 + 6 * ind_cell_height));
+
+                        if row_counter == 0 {//if this is the first one to be found, generate a header
+
+                            if table_counter >= 6 {panic!();} //would break the layout if there are to many tables, but not displaying them at all would also not be good
+
+
+                            //creating the table header
+                            let header = EmptyElement::at((table_offset_x, table_offset_y))
+                            + Rectangle::new(
+                                [(0, 100), (column_count * ind_cell_width, 100 + ind_cell_height)],
+                                BLACK
+                            )
+                            + Text::new(
+                                limit_name.clone(),
+                                (10, ind_cell_height/2 + ind_cell_height),
+                                style.clone(),
+                            )
+                            + Rectangle::new(
+                                [(0, 100 + ind_cell_height), (ind_cell_width, 100 + ind_cell_height * 2)],
+                                BLACK
+                            )
+                            + Text::new(
+                                "Frequency [".to_string() + &(types[idx].0.to_string()) + "]",
+                                (10, ind_cell_height/2 + ind_cell_height * 2),
+                                style.clone(),
+                            )
+                            + Rectangle::new(
+                                [(0, 100 + ind_cell_height), (ind_cell_width, 100 + ind_cell_height * 2)],
+                                BLACK
+                            )
+                            + Text::new(
+                                "Peak Level [".to_string() + &(types[idx].1.to_string()) + "]",
+                                (10 + ind_cell_width, ind_cell_height/2 + ind_cell_height * 2),
+                                style.clone(),
+                            )
+                            + Rectangle::new(
+                                [(2 * ind_cell_width, 100 + ind_cell_height), (3 * ind_cell_width, 100 + ind_cell_height * 2)],
+                                BLACK
+                            )
+                            + Text::new(
+                                "Threshold [".to_string() + &(types[idx].1.to_string()) + "]",
+                                (10 + 2 * ind_cell_width, ind_cell_height/2 + ind_cell_height * 2),
+                                style.clone(),
+                            )
+                            ;
+
+                            root_table.draw(&header)?;
+                        } //will never generate if no limit is broken
+
                         //plot the peak as a triangle
 
                         let (px, py) = chart.plotting_area().map_coordinate(&(peak.frequency, peak.level));
-                        let half_width: i32 = 8;
-                        let height: i32 = 16;
+                        let half_width: i32 = 24;
+                        let height: i32 = 48;
 
                         let vertices = vec![
                             (px, py),                       // tip (bottom)
@@ -399,7 +488,26 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
                         root.draw(&triangle)?;
 
                         //push peak to peak table
-                        peaks.push(peak);
+                        //peaks.push(peak);
+
+                        //creating the rows
+                        let cell_1 = EmptyElement::at((table_offset_x, table_offset_y))
+                        + Rectangle::new([(0, 100 + ind_cell_height * 2 + ind_cell_height * row_counter), ((column_count * ind_cell_width) / 3, 100 + ind_cell_height * 3 + ind_cell_height * row_counter)],BLACK)
+                        + Text::new(format!("{:.2}", peak.frequency), (10, ind_cell_height/2 + ind_cell_height * 3 + ind_cell_height * row_counter), style.clone());
+
+                        let cell_2 = EmptyElement::at((table_offset_x, table_offset_y))
+                        + Rectangle::new([((column_count * ind_cell_width) / 3, 100 + ind_cell_height * 2 + ind_cell_height * row_counter), (2 * (column_count * ind_cell_width) / 3, 100 + ind_cell_height * 3 + ind_cell_height * row_counter)],BLACK)
+                        + Text::new(format!("{:.2}", peak.level), (10 + ind_cell_width, ind_cell_height/2 + ind_cell_height * 3 + ind_cell_height * row_counter), style.clone());
+
+                        let cell_3 = EmptyElement::at((table_offset_x, table_offset_y))
+                        + Rectangle::new([(2*(column_count * ind_cell_width)/3, 100 + ind_cell_height * 2 + ind_cell_height * row_counter), (column_count * ind_cell_width, 100 + ind_cell_height * 3 + ind_cell_height * row_counter)],BLACK)
+                        + Text::new(format!("{:.2}", peak.limit_level), (10 + 2 * ind_cell_width, ind_cell_height/2 + ind_cell_height * 3 + ind_cell_height * row_counter), style.clone());
+
+                        root_table.draw(&cell_1)?;
+                        root_table.draw(&cell_2)?;
+                        root_table.draw(&cell_3)?;
+
+                        row_counter += 1;
                     }
 
                     //plot each limit chunk(breaks if the limit pair format start<->finish is broken):
@@ -410,10 +518,15 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
                         temp.label(limit_name).legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color_clone.stroke_width(3)));
                     }
                 }
+                if row_counter != 0 {
+                    table_counter += 1;
+                }
             }
         }
 
-        generate_table(&(file_path.to_string() + &format!("/{}/{}_{}.csv", "!raw_graph", &testname, &order[idx])), peaks)?;
+        //generate_table(&(file_path.to_string() + &format!("/{}/{}_{}.csv", "!raw_graph", &testname, &order[idx])), peaks)?;
+
+
 
         let chart_area = chart.plotting_area();
         let (width, height) = chart_area.dim_in_pixel();
@@ -431,9 +544,7 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
             .background_style(WHITE)
             .draw()?;
 
-
-
-
+        //finally flushing all to file
         root.present()?;
 
     }
@@ -443,14 +554,19 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/*
+//nice, but can be changed and pasting into word sucks.
 fn generate_table(file_path: &str, peaks: Vec<Peak>) -> Result<(), Box<dyn Error>> {
+
     let mut wtr = csv::Writer::from_path(file_path)?;
     for peak in &peaks {
         wtr.serialize(peak)?;
     }
     wtr.flush()?;
     Ok(())
+
 }
+*/
 
 fn log_minor_lines(min: f64, max: f64, max_light_lines: usize) -> Vec<f64> {
     let mut result = Vec::new();
