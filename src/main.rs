@@ -25,18 +25,56 @@ use serde::Serialize;
 
 use rfd::FileDialog;
 
-static PLOT_DIM_X: i32 = 1920; //450 //1920
-static PLOT_DIM_Y: i32 = 1080; //340 //1080
+static OUTPUT_DIR_NAME: &str = "!raw_graph";
 
-static PLOT_COLOR_1: RGBColor = BLUE;
-static PLOT_COLOR_2: RGBColor = BLACK;
-static PLOT_COLOR_3: RGBColor = MAGENTA;
-static PLOT_COLOR_4: RGBColor = GREEN;
+static DIM_X: i32 = 1920; //450 //1920
+static DIM_Y: i32 = 1080; //340 //1080
+
+static OFFSET_Y_TOP: f64 = 20.0;
+static OFFSET_Y_BOT: f64 = 20.0;
+
+static MAIN_COLOR: RGBColor = WHITE;
+static SECONDARY_COLOR: RGBColor = BLACK;
+
+static GRAPH_COLOR_1: RGBColor = BLUE;
+static GRAPH_COLOR_2: RGBColor = BLACK;
+static GRAPH_COLOR_3: RGBColor = MAGENTA;
+static GRAPH_COLOR_4: RGBColor = GREEN;
 
 static LIMIT_COLOR_PK: RGBColor = GREEN;
 static LIMIT_COLOR_AV: RGBColor = RED;
 static LIMIT_COLOR_QP: RGBColor = GREEN;
-static LIMIT_COLOR_BASELEVEL: RGBColor = BLACK;
+static LIMIT_COLOR_BASELEVEL: RGBColor = MAGENTA;
+
+static STYLE_GENERAL_TYPE: &str = "sans-serif";
+static STYLE_GENERAL_SIZE: i32 = 30;
+static STYLE_MARKER_TYPE: &str = "sans-serif";
+static STYLE_MARKER_SIZE: i32 = 22;
+
+static CHART_X_LABEL_AREA_SIZE: i32 = 75;
+static CHART_Y_LABEL_AREA_SIZE: i32 = 100;
+static CHART_MARGIN: i32 = 50;
+
+static MESH_ALPHA: f64 = 0.3;
+static MESH_THICKNESS: u32 = 1;
+
+static CUSTOM_TICKS_LENGTH: i32 = 30;
+static CUSTOM_TICKS_GAP: i32 = 4;
+
+static LEGEND_LINE_THICKNESS: u32 = 3;
+
+static MARKER_SIZE: i32 = 16;
+static MARKER_CLOSE_CRITERION_X: i32 = 20;
+static MARKER_CLOSE_CRITERION_Y: i32 = 20;
+static MARKER_CLOSE_SHIFT: i32 = 5;
+static MARKER_PREFIX: &str = "M";
+static MARKER_POS_OFFSET_BASE: usize = 160;
+static MARKER_POS_OFFSET_BODY: usize = 40;
+static MARKER_POS_OFFSET_SCALE: usize = 180;
+static MARKER_POS_OFFSET_LINE_BASE: i32 = 100;
+static MARKER_POS_OFFSET_LINE_SCALE: i32 = 10;
+
+
 
 #[derive(Debug, PartialEq)]
 struct RawData {
@@ -238,7 +276,7 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
 
     //plot pre-setup
 
-    let colors_plot = [PLOT_COLOR_1, PLOT_COLOR_2, PLOT_COLOR_3, PLOT_COLOR_4];
+    let colors_plot = [GRAPH_COLOR_1, GRAPH_COLOR_2, GRAPH_COLOR_3, GRAPH_COLOR_4];
     let colors_limit = [LIMIT_COLOR_BASELEVEL, LIMIT_COLOR_PK, LIMIT_COLOR_AV, LIMIT_COLOR_QP];
 
     //build color order based on naming of limits:
@@ -253,37 +291,40 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
 
     let (mut y_min, mut y_max) = find_min_max(&raw_data, &limits).unwrap();
 
-    y_min = ((y_min - 20.0)/10.0).round() * 10.0;
-    y_max = ((y_max + 10.0)/10.0).round() * 10.0;
+    y_min = ((y_min - OFFSET_Y_BOT)/10.0).round() * 10.0;
+    y_max = ((y_max + OFFSET_Y_TOP)/10.0).round() * 10.0;
 
-    let bg_color = WHITE;
-    let secondary_color = BLACK;
-    let font_style = ("sans-serif", 30).into_font();
+    let bg_color = MAIN_COLOR;
+    let secondary_color = SECONDARY_COLOR;
+    let font_style = (STYLE_GENERAL_TYPE, STYLE_GENERAL_SIZE).into_font();
+    let font_style_marker = (STYLE_MARKER_TYPE, STYLE_MARKER_SIZE).into_font();
 
-    fs::create_dir_all(file_path.to_string() + "/!raw_graph")?;
+    if OUTPUT_DIR_NAME.is_empty(){panic!()};
+
+    fs::create_dir_all(file_path.to_string() + "/" + OUTPUT_DIR_NAME)?;
 
     //for each trace make a graphic:
 
     for (idx, emi) in raw_data.into_iter().enumerate() {
 
         //begin plotting
-        let specific_path = file_path.to_string() + &format!("/{}/{}_{}.svg", "!raw_graph", &testname, &order[idx]);
-        let root = SVGBackend::new(&specific_path, (PLOT_DIM_X.try_into()?, PLOT_DIM_Y.try_into()?)).into_drawing_area();
+        let specific_path = file_path.to_string() + &format!("/{}/{}_{}.svg", OUTPUT_DIR_NAME, &testname, &order[idx]);
+        let root = SVGBackend::new(&specific_path, (DIM_X.try_into()?, DIM_Y.try_into()?)).into_drawing_area();
         root.fill(&bg_color)?;
 
         let mut chart = ChartBuilder::on(&root)
-            .caption(format!("{} {}", testname, &order[idx]), ("sans-serif", 30).into_font().color(&secondary_color))
-            .x_label_area_size(75)
-            .y_label_area_size(100)
-            .margin(50)
+            .caption(format!("{} {}", testname, &order[idx]), font_style.clone().color(&secondary_color))
+            .x_label_area_size(CHART_X_LABEL_AREA_SIZE)
+            .y_label_area_size(CHART_Y_LABEL_AREA_SIZE)
+            .margin(CHART_MARGIN)
             .build_cartesian_2d((f_min .. f_max).log_scale(), y_min..y_max)?;
 
         chart.configure_mesh()
         .x_desc(format!("Frequency / {}", types[idx].0))
         .y_desc(format!("Emissions / {}", types[idx].1))
         .axis_desc_style(font_style.clone().with_color(secondary_color))
-        .bold_line_style(secondary_color.mix(0.3).stroke_width(1))
-        .light_line_style(secondary_color.mix(0.3).stroke_width(1))
+        .bold_line_style(secondary_color.mix(MESH_ALPHA).stroke_width(MESH_THICKNESS))
+        .light_line_style(secondary_color.mix(MESH_ALPHA).stroke_width(MESH_THICKNESS))
         .disable_x_mesh() //only way to not render minor tickmark lines... sadly also disables major lines... gotta do em manually then...
         .y_max_light_lines(0)
         .x_max_light_lines(0)
@@ -306,7 +347,7 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
             chart.draw_series(
                 LineSeries::new(
                     vec![(x, y_min), (x, y_max)],
-                    BLACK.mix(0.3)
+                    secondary_color.mix(MESH_ALPHA)
                 )
             )?;
         }
@@ -319,7 +360,7 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
                     vec![(x, y_min), (x, y_max)],
                     0,
                     10,
-                    |c| Circle::new(c, 1, BLACK.mix(0.3).filled()),
+                    move |c| Circle::new(c, 1, secondary_color.mix(MESH_ALPHA).filled()),
                 )
             )?;
         }
@@ -332,23 +373,24 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
         let (px_right, _)        = plotting_area.map_coordinate(&(f_max, y_min));
 
         // px_left/px_right and py_bottom are already in root pixel space
-        let tick_len = 30i32;
+        let tick_len = CUSTOM_TICKS_LENGTH;
         root.draw(&PathElement::new(
             vec![(px_left, py_bottom), (px_left, py_bottom + tick_len)],
-            BLACK,
+            secondary_color,
         ))?;
         root.draw(&PathElement::new(
             vec![(px_right, py_bottom), (px_right, py_bottom + tick_len)],
-            BLACK,
+            secondary_color,
         ))?;
 
         //now the tick labels
-        let style = TextStyle::from(font_style.clone()).pos(Pos::new(HPos::Center, VPos::Top));
+        let left_style = TextStyle::from(font_style.clone()).pos(Pos::new(HPos::Left, VPos::Top));
+        let right_style = TextStyle::from(font_style.clone()).pos(Pos::new(HPos::Right, VPos::Top));
 
-        let gap = 4i32;
+        let gap = CUSTOM_TICKS_GAP;
 
-        root.draw_text(&f_min.to_string(), &style, (px_left, py_bottom + tick_len + gap))?;
-        root.draw_text(&f_max.to_string(), &style, (px_right, py_bottom + tick_len + gap))?;
+        root.draw_text(&f_min.to_string(), &left_style, (px_left, py_bottom + tick_len + gap))?;
+        root.draw_text(&f_max.to_string(), &right_style, (px_right, py_bottom + tick_len + gap))?;
 
         let mut y = y_min;
         while y < y_max {
@@ -358,7 +400,7 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
                     vec![(f_min, y), (f_max, y)],
                     0,
                     10,
-                    |c| Circle::new(c, 1, BLACK.mix(0.3).filled()),
+                    move |c| Circle::new(c, 1, secondary_color.mix(MESH_ALPHA).filled()),
                 ))?;
             }
         }
@@ -366,8 +408,7 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
         //chart actual data the cloning of the data could be avoided if the peak_search was adjusted to run once at the beginning
         //that would double the looping over limits. Its speed vs space and this configuration focuses more on speed.
         chart.draw_series(LineSeries::new(emi.clone(), &colors_plot[idx]))?
-            .label(order[idx].to_string() + " Measurement Results").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], colors_plot[idx].stroke_width(3)));
-
+            .label(order[idx].to_string() + " Measurement Results").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], colors_plot[idx].stroke_width(LEGEND_LINE_THICKNESS)));
 
 
         let mut peaks: Vec<Peak> = vec![];
@@ -379,26 +420,10 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
                 for i in 0..(limit.len()/2) {
                     if limit[2*i+1].0 <= f_min {continue;} //dont plot sub-limits that end before the graph has even begun
                     if limit[2*i].0 >= f_max {break;} //dont plot sub-limits that start where the graph is already over
+
                     let peak = peak_search(&emi, lim, 2*i, 2*i+1);
                     //plot the peaks above the limits
                     if let Some(peak) = peak {
-
-                        //plot the peak as a triangle
-
-                        let (px, py) = chart.plotting_area().map_coordinate(&(peak.frequency, peak.level));
-                        let half_width: i32 = 8;
-                        let height: i32 = 16;
-
-                        let vertices = vec![
-                            (px, py),                       // tip (bottom)
-                            (px - half_width, py - height), // top-left
-                            (px + half_width, py - height), // top-right
-                            (px, py),                       // close path
-                        ];
-
-                        let triangle = Polygon::new(vertices, BLACK);
-                        root.draw(&triangle)?;
-
                         //push peak to peak table
                         peaks.push(peak);
                     }
@@ -414,22 +439,110 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
             }
         }
 
-        generate_table(&(file_path.to_string() + &format!("/{}/{}_{}.csv", "!raw_graph", &testname, &order[idx])), peaks)?;
+        //and finally plot the limit breaks. cannot be done before, because all peaks need to be known at start so close ones can be considered for positioning.
+        //first sort peaks by their frequency
+        peaks.sort_by(|a, b| a.frequency.total_cmp(&b.frequency));
+        for i in 0..peaks.len() {
+            let (ppx, ppy) = if i != 0 {chart.plotting_area().map_coordinate(&(peaks[i-1].frequency, peaks[i-1].level))} else {(i32::MIN, i32::MIN)}; //previous
+            let (mut pcx, pcy) = chart.plotting_area().map_coordinate(&(peaks[i].frequency, peaks[i].level)); //current
+            let (pnx, pny) = if i != peaks.len() - 1 {chart.plotting_area().map_coordinate(&(peaks[i+1].frequency, peaks[i+1].level))} else {(i32::MIN, i32::MIN)}; //previous
+
+            //plotting the markers themselves (triangles)
+
+            //triangle marker properties:
+            let half_width: i32 = MARKER_SIZE/2;
+            let height: i32 = MARKER_SIZE;
+
+            let vertices = vec![
+                (pcx, pcy),                       // tip (bottom)
+                (pcx - half_width, pcy - height), // top-left
+                (pcx + half_width, pcy - height), // top-right
+                (pcx, pcy),                       // close path
+            ];
+
+            let triangle = Polygon::new(vertices, secondary_color);
+
+            root.draw(&triangle)?;
+
+            //the ordeal to position the number next to the triangle with (hopefully) little overlap
+            let style = if ppx != i32::MIN && (pcx - ppx) < MARKER_CLOSE_CRITERION_X && (pcy - ppy) < MARKER_CLOSE_CRITERION_Y {
+                if pnx != i32::MIN && (pnx - pcx) < MARKER_CLOSE_CRITERION_X && (pny - pcy) < MARKER_CLOSE_CRITERION_Y {
+                    //both too close -> centered, they will be offset
+                    TextStyle::from(font_style_marker.clone()).pos(Pos::new(HPos::Center, VPos::Bottom))
+                } else {
+                    //only previous too close -> align-right
+                    //check if this would push it out of the screen
+                    /*
+                    if pcx < (120 + chart.plotting_area().dim_in_pixel().0) as i32 {
+                        pcx += 5;
+                        TextStyle::from(font_style_marker.clone()).pos(Pos::new(HPos::Left, VPos::Bottom))
+                    } else {
+                        TextStyle::from(font_style_marker.clone()).pos(Pos::new(HPos::Center, VPos::Bottom))
+                    }
+                    */
+                    //looks worse than if it just extends beyond the plot
+                    pcx += MARKER_CLOSE_SHIFT;
+                    TextStyle::from(font_style_marker.clone()).pos(Pos::new(HPos::Left, VPos::Bottom))
+                }
+            } else {
+                if pnx != i32::MIN && (pnx - pcx) < MARKER_CLOSE_CRITERION_X && (pny - pcy) < MARKER_CLOSE_CRITERION_Y {
+                    //only next too close -> align-left
+                    //check if this would push it out of the screen
+                    /*
+                    if pcx > 20 {
+                        pcx -= 5;
+                        TextStyle::from(font_style_marker.clone()).pos(Pos::new(HPos::Right, VPos::Bottom))
+                    } else {
+                        TextStyle::from(font_style_marker.clone()).pos(Pos::new(HPos::Center, VPos::Bottom))
+                    }
+                    */
+                    //looks worse than if it just extends beyond the plot
+                    pcx -= MARKER_CLOSE_SHIFT;
+                    TextStyle::from(font_style_marker.clone()).pos(Pos::new(HPos::Right, VPos::Bottom))
+                } else {
+                    //neither too close -> centered
+                    TextStyle::from(font_style_marker.clone()).pos(Pos::new(HPos::Center, VPos::Bottom))
+                }
+            };
+
+            root.draw_text(
+                &format!("{}{}", MARKER_PREFIX, i+1),
+                &style,
+                (pcx, pcy - height)
+            )?;
+
+
+            //now just place the peak info starting in the top left of the image
+            let style = TextStyle::from(font_style_marker.clone()).pos(Pos::new(HPos::Left, VPos::Top));
+            let text_number = Text::new(format!("{}{})", MARKER_PREFIX, i + 1), ((MARKER_POS_OFFSET_BASE + 180 * i) as i32, MARKER_POS_OFFSET_LINE_BASE + MARKER_POS_OFFSET_LINE_SCALE), &style);
+            let text_freq = Text::new(format!("{:.2} {}", peaks[i].frequency, types[idx].0), ((MARKER_POS_OFFSET_BASE + MARKER_POS_OFFSET_BODY + MARKER_POS_OFFSET_SCALE * i) as i32, MARKER_POS_OFFSET_LINE_BASE), &style);
+            let text_level = Text::new(format!("{:.2} {}", peaks[i].level, types[idx].1), ((MARKER_POS_OFFSET_BASE + MARKER_POS_OFFSET_BODY + MARKER_POS_OFFSET_SCALE * i) as i32, MARKER_POS_OFFSET_LINE_BASE + 2 * MARKER_POS_OFFSET_LINE_SCALE), &style);
+
+            root.draw(&text_number)?;
+            root.draw(&text_freq)?;
+            root.draw(&text_level)?;
+
+        }
+
+        //generate_table(&(file_path.to_string() + &format!("/{}/{}_{}.csv", "!raw_graph", &testname, &order[idx])), peaks)?;
+
+        //write peak values to graph
+        //todo!
 
         let chart_area = chart.plotting_area();
         let (width, height) = chart_area.dim_in_pixel();
 
         chart_area.draw(&Rectangle::new(
             [(0.0, y_min), (width as f64, height as f64)],
-            ShapeStyle::from(&BLACK).stroke_width(2)
+            ShapeStyle::from(&secondary_color).stroke_width(2)
         ))?;
 
         //position legend correctly
         chart.configure_series_labels()
             .position(SeriesLabelPosition::LowerRight)
             .label_font(font_style.clone())
-            .border_style(BLACK)
-            .background_style(WHITE)
+            .border_style(secondary_color)
+            .background_style(bg_color)
             .draw()?;
 
 
@@ -444,14 +557,14 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn generate_table(file_path: &str, peaks: Vec<Peak>) -> Result<(), Box<dyn Error>> {
+/*fn generate_table(file_path: &str, peaks: Vec<Peak>) -> Result<(), Box<dyn Error>> {
     let mut wtr = csv::Writer::from_path(file_path)?;
     for peak in &peaks {
         wtr.serialize(peak)?;
     }
     wtr.flush()?;
     Ok(())
-}
+}*/
 
 fn log_minor_lines(min: f64, max: f64, max_light_lines: usize) -> Vec<f64> {
     let mut result = Vec::new();
