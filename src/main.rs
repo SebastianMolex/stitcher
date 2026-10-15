@@ -1,85 +1,105 @@
 use std::{
-    error::Error,
     cmp::Ordering,
-    path::PathBuf,
+    error::Error,
+    ffi::OsStr,
+    thread::sleep,
+    time::Duration,
     fs::{
         self,
         File
     },
     io::{
+        Read,
+        Write
+    },
+    path::{
         self,
-        BufRead,
-        BufReader,
-        Read
-    }
+        PathBuf,
+        Path
+    },
+    sync::OnceLock
 };
 
-//test
+use csv::WriterBuilder;
+
 use encoding_rs::UTF_16LE;
 use encoding_rs_io::DecodeReaderBytesBuilder;
 
 use plotters::prelude::*;
 use plotters::style::text_anchor::{Pos, HPos, VPos};
 
-use serde::Serialize;
-
-use rfd::FileDialog;
-
-static OUTPUT_DIR_NAME: &str = "!raw_graph";
-
-static DIM_X: i32 = 1920; //450 //1920
-static DIM_Y: i32 = 1080; //340 //1080
-
-static OFFSET_Y_TOP: f64 = 20.0;
-static OFFSET_Y_BOT: f64 = 20.0;
-
-static MAIN_COLOR: RGBColor = WHITE;
-static SECONDARY_COLOR: RGBColor = BLACK;
-
-static GRAPH_COLOR_1: RGBColor = BLUE;
-static GRAPH_COLOR_2: RGBColor = BLACK;
-static GRAPH_COLOR_3: RGBColor = MAGENTA;
-static GRAPH_COLOR_4: RGBColor = GREEN;
-
-static LIMIT_COLOR_PK: RGBColor = GREEN;
-static LIMIT_COLOR_AV: RGBColor = RED;
-static LIMIT_COLOR_QP: RGBColor = GREEN;
-static LIMIT_COLOR_BASELEVEL: RGBColor = MAGENTA;
-
-static STYLE_GENERAL_TYPE: &str = "sans-serif";
-static STYLE_GENERAL_SIZE: i32 = 30;
-static STYLE_MARKER_TYPE: &str = "sans-serif";
-static STYLE_MARKER_SIZE: i32 = 22;
-
-static CHART_X_LABEL_AREA_SIZE: i32 = 75;
-static CHART_Y_LABEL_AREA_SIZE: i32 = 100;
-static CHART_MARGIN: i32 = 50;
-
-static MESH_ALPHA: f64 = 0.3;
-static MESH_THICKNESS: u32 = 1;
-
-static CUSTOM_TICKS_LENGTH: i32 = 30;
-static CUSTOM_TICKS_GAP: i32 = 4;
-
-static LEGEND_LINE_THICKNESS: u32 = 3;
-
-static MARKER_SIZE: i32 = 16;
-static MARKER_CLOSE_CRITERION_X: i32 = 20;
-static MARKER_CLOSE_CRITERION_Y: i32 = 20;
-static MARKER_CLOSE_SHIFT: i32 = 5;
-static MARKER_PREFIX: &str = "M";
-static MARKER_POS_OFFSET_BASE: usize = 160;
-static MARKER_POS_OFFSET_BODY: usize = 40;
-static MARKER_POS_OFFSET_SCALE: usize = 180;
-static MARKER_POS_OFFSET_LINE_BASE: i32 = 100;
-static MARKER_POS_OFFSET_LINE_SCALE: i32 = 10;
+use serde::{Serialize, Deserialize};
 
 
+static CONFIG: OnceLock<Config> = OnceLock::new(); //to store config file
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Config { //config file data
+    test_dir: String,
+    output_dir_name: String,
+
+    dim_x: i32,
+    dim_y: i32,
+
+    offset_y_top: f64,
+    offset_y_bot: f64,
+
+    main_color: String,
+    secondary_color: String,
+
+    graph_color_1: String,
+    graph_color_2: String,
+    graph_color_3: String,
+    graph_color_4: String,
+
+    limit_color_pk: String,
+    limit_color_av: String,
+    limit_color_qp: String,
+    limit_color_baselevel: String,
+
+    style_general_type: String,
+    style_general_size: i32,
+    style_marker_type: String,
+    style_marker_size: i32,
+
+    chart_x_label_area_size: i32,
+    chart_y_label_area_size: i32,
+    chart_margin: i32,
+
+    mesh_alpha: f64,
+    mesh_thickness: u32,
+
+    custom_ticks_length: i32,
+    custom_ticks_gap: i32,
+
+    legend_line_thickness: u32,
+
+    marker_size: i32,
+    marker_close_criterion_x: i32,
+    marker_close_criterion_y: i32,
+    marker_close_shift: i32,
+    marker_prefix: String,
+    marker_pos_offset_base: usize,
+    marker_pos_offset_body: usize,
+    marker_pos_offset_scale: usize,
+    marker_pos_offset_line_base: i32,
+    marker_pos_offset_line_scale: i32,
+}
 
 #[derive(Debug, PartialEq)]
 struct RawData {
     types: Vec<(String, String)>,
     values: Vec<Vec<(f64, f64)>>,
+}
+
+struct RawElem {
+    types: (String, String),
+    values: Vec<(f64, f64)>,
+}
+
+struct RawDataIter {
+    types: std::vec::IntoIter<(String, String)>,
+    values: std::vec::IntoIter<Vec<(f64, f64)>>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -96,10 +116,124 @@ struct Peak {
     limit_level: f64,
 }
 
+impl Iterator for RawDataIter {
+    type Item = RawElem;
+    fn next(&mut self) -> Option<Self::Item> {
+        match (self.types.next(), self.values.next()) {
+            (Some(types), Some(values)) => Some(RawElem{ types, values }),
+            _ => None,
+
+        }
+    }
+}
+
+impl IntoIterator for RawData {
+    type Item = RawElem;
+    type IntoIter = RawDataIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        RawDataIter{
+            types: self.types.into_iter(),
+            values: self.values.into_iter(),
+        }
+    }
+}
+
+
 
 fn main() {
-    plotter("C:\\ProgramData\\EMC32\\Customer Configuration\\SR_Conf_v5_1_beta\\Tests\\tt\\TL81000 (2024) AN L1 9 kHz").unwrap();
-    plotter("C:\\ProgramData\\EMC32\\Customer Configuration\\SR_Conf_v5_1_beta\\Tests\\tt\\DUT1 MPP Rod Antenna 9k PKCAV").unwrap();
+    if !Path::new("config.ini").exists() {
+        println!("| Warning! | no config found, generating new config");
+        create_new_ini().unwrap();
+        println!("| Message! | config generated, terminating... relaunch to generate plot files!");
+        sleep(Duration::from_secs(5));
+        return; //halts execution
+    } //if config doesnt exist, create it
+    println!("| Message! | loading config...");
+    get_config(); //loads config to global static
+    let conf = CONFIG.get().unwrap();
+    println!("| Message! | config found, generating plots...");
+    //plotting:
+
+    let mut paths_to_plot: Vec<PathBuf> = vec![];
+    let path = path::absolute(&conf.test_dir).unwrap();
+    search_for_all_test_paths(&path, &mut paths_to_plot);
+
+    for dir in paths_to_plot {
+        plotter(&dir).unwrap();
+    }
+
+    println!("| Message! | all plots generated without error. terminating...");
+    sleep(std::time::Duration::from_secs(5));
+}
+
+fn get_config() -> &'static Config {
+    CONFIG.get_or_init(|| {
+        let content = std::fs::read_to_string("config.ini").unwrap();
+        serde_ini::from_str(&content).unwrap()
+    })
+}
+
+fn create_new_ini() -> Result<(), Box<dyn Error>>{
+    let config = Config { //default values
+        test_dir: "../../../../Tests/".to_string(),
+        output_dir_name: "!raw_graph".to_string(),
+        dim_x: 1920,
+        dim_y: 1080,
+        offset_y_top: 20.0,
+        offset_y_bot: 20.0,
+        main_color: "#FFFFFF".to_string(),
+        secondary_color: "#000000".to_string(),
+        graph_color_1: "#0000FF".to_string(),
+        graph_color_2: "#000000".to_string(),
+        graph_color_3: "#FF00FF".to_string(),
+        graph_color_4: "#00FF00".to_string(),
+        limit_color_pk: "#00FF00".to_string(),
+        limit_color_av: "#FF0000".to_string(),
+        limit_color_qp: "#00FF00".to_string(),
+        limit_color_baselevel: "#FF00FF".to_string(),
+        style_general_type: "sans-serif".to_string(),
+        style_general_size: 30,
+        style_marker_type: "sans-serif".to_string(),
+        style_marker_size: 22,
+        chart_x_label_area_size: 75,
+        chart_y_label_area_size: 100,
+        chart_margin: 50,
+        mesh_alpha: 0.3,
+        mesh_thickness: 1,
+        custom_ticks_length: 30,
+        custom_ticks_gap: 4,
+        legend_line_thickness: 3,
+        marker_size: 6,
+        marker_close_criterion_x: 20,
+        marker_close_criterion_y: 20,
+        marker_close_shift: 5,
+        marker_prefix: "M".to_string(),
+        marker_pos_offset_base: 160,
+        marker_pos_offset_body: 40,
+        marker_pos_offset_scale: 180,
+        marker_pos_offset_line_base: 100,
+        marker_pos_offset_line_scale: 10,
+    };
+    let ini_string = serde_ini::to_string(&config)?;
+    fs::write("config.ini", ini_string)?;
+    Ok(())
+}
+
+fn hex_to_rgb(hex: &str) -> Result<RGBColor, Box<dyn Error>> {
+    let clean = hex.strip_prefix('#').unwrap_or(hex);
+    if clean.len() != 6 {
+        Err("Invalid hex length")?;
+    }
+
+    let val = u32::from_str_radix(clean, 16).map_err(|_| "Invalid hex digits")?;
+
+    //minor bitmagic
+    let r = u8::try_from((val >> 16) & 0xFF)?;
+    let g = u8::try_from((val >> 8) & 0xFF)?;
+    let b = u8::try_from(val & 0xFF)?;
+
+    Ok(RGBColor(r, g, b))
 }
 
 fn read_utf16le_file(path: &str) -> Result<String, std::io::Error> {
@@ -114,6 +248,25 @@ fn read_utf16le_file(path: &str) -> Result<String, std::io::Error> {
     decoder.read_to_string(&mut contents)?;
 
     Ok(contents)
+}
+
+//recursive folder search
+//probably takes decades if given a root folder of a drive.
+//this should only take the folder where tests are actually expected to be.
+fn search_for_all_test_paths(base_dir: &PathBuf, result: &mut Vec<PathBuf>) { //emissions tests are all such tests, that have a "Preview Result 1.Result" file.
+    if let Ok(dirs) = fs::read_dir(base_dir){
+        for entry in dirs.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                search_for_all_test_paths(&path, result);
+            } else {
+                if let Some(file_name) = path.file_name() && file_name  == OsStr::new("Preview Result 1.Result") {
+                    //found the file, add dir as a test.
+                    result.push(path.parent().unwrap().to_path_buf());
+                }
+            }
+        }
+    }
 }
 
 fn get_raw_data(file_path: &str) -> RawData { //(Vec<(Freq Unit: String, Level Unit: String)>, Vec<Vec<(Freq: f64, Level: f64)>>)
@@ -181,7 +334,7 @@ fn get_limits(file_path: &str) -> Vec<Limit> {
         let mut prefix_done = false;
 
         //get limit type from filename:
-        let name = std::path::Path::new(&file_path).file_stem().and_then(|name| name.to_str()).unwrap().to_string();
+        let name = Path::new(&file_path).file_stem().and_then(|name| name.to_str()).unwrap().to_string();
 
         output.push(Limit { name, values: vec![] });
 
@@ -260,7 +413,12 @@ fn build_color_list(colors: &[RGBColor], limits: &[Limit], order: &[&str]) -> Ve
     output
 }
 
-fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
+fn plotter(file_path: &Path) -> Result<(), Box<dyn Error>> {
+
+    let file_path = file_path.to_string_lossy();
+    let file_path = &file_path.as_ref();
+
+    let conf = CONFIG.get().unwrap();
 
     let order = ["PK", "AV", "QP"];
 
@@ -268,21 +426,29 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
     //it is critical that raw_datas index matches the respective limits index. Sort logic goes through PK/AV/QP shortcut in limit name in /System of test.
 
     //extract testname from file_path
-    let testname = std::path::Path::new(file_path).file_name().and_then(|name| name.to_str()).unwrap();
+    let testname = Path::new(file_path).file_name().and_then(|name| name.to_str()).unwrap();
 
     let raw = get_raw_data(file_path);
     let (types, raw_data) = (raw.types, raw.values);
     let limits: Vec<Limit> = get_limits(file_path);
 
+    if raw_data.is_empty() { //most likely case, Preview Result 1.Result is in binary format, so quit
+        println!("| Warning! | Cannot fetch raw data for {}.", file_path);
+        println!("             It is most likely still in binary format; Please re-save the test without the EMC32 flag: \"Extras>Options>File/Test>Save EMI Result Tables > 10000 Lines in Binary Format\"");
+        return Ok(()); //ok and not error, as this can just be ignored and should not force a stop, like an error would.
+    }
+
+
+
     //plot pre-setup
 
-    let colors_plot = [GRAPH_COLOR_1, GRAPH_COLOR_2, GRAPH_COLOR_3, GRAPH_COLOR_4];
-    let colors_limit = [LIMIT_COLOR_BASELEVEL, LIMIT_COLOR_PK, LIMIT_COLOR_AV, LIMIT_COLOR_QP];
+    let colors_plot = [hex_to_rgb(&conf.graph_color_1)?, hex_to_rgb(&conf.graph_color_2)?, hex_to_rgb(&conf.graph_color_3)?, hex_to_rgb(&conf.graph_color_4)?];
+    let colors_limit = [hex_to_rgb(&conf.limit_color_baselevel)?, hex_to_rgb(&conf.limit_color_pk)?, hex_to_rgb(&conf.limit_color_av)?, hex_to_rgb(&conf.limit_color_qp)?];
 
     //build color order based on naming of limits:
     let color_list_limits: Vec<RGBColor> = build_color_list(&colors_limit, &limits, &["Baselevel", "PK", "AV", "QP"]);
 
-    if raw_data.len() - 1 > colors_plot.len(){panic!()};
+    if raw_data.len() > colors_plot.len() + 1 {panic!()};
 
     let freqs_plot: Vec<f64> = raw_data[0].iter().map(|(first, _)| first.to_owned()).collect();
 
@@ -291,40 +457,42 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
 
     let (mut y_min, mut y_max) = find_min_max(&raw_data, &limits).unwrap();
 
-    y_min = ((y_min - OFFSET_Y_BOT)/10.0).round() * 10.0;
-    y_max = ((y_max + OFFSET_Y_TOP)/10.0).round() * 10.0;
+    y_min = ((y_min - conf.offset_y_bot)/10.0).round() * 10.0;
+    y_max = ((y_max + conf.offset_y_top)/10.0).round() * 10.0;
 
-    let bg_color = MAIN_COLOR;
-    let secondary_color = SECONDARY_COLOR;
-    let font_style = (STYLE_GENERAL_TYPE, STYLE_GENERAL_SIZE).into_font();
-    let font_style_marker = (STYLE_MARKER_TYPE, STYLE_MARKER_SIZE).into_font();
+    let bg_color = hex_to_rgb(&conf.main_color)?;
+    let secondary_color = hex_to_rgb(&conf.secondary_color)?;
+    let font_style = (conf.style_general_type.as_str(), conf.style_general_size).into_font();
+    let font_style_marker = (conf.style_marker_type.as_str(), conf.style_marker_size).into_font();
 
-    if OUTPUT_DIR_NAME.is_empty(){panic!()};
+    if conf.output_dir_name.is_empty(){panic!()};
 
-    fs::create_dir_all(file_path.to_string() + "/" + OUTPUT_DIR_NAME)?;
+    fs::create_dir_all(file_path.to_string() + "/" + &conf.output_dir_name)?;
 
     //for each trace make a graphic:
 
     for (idx, emi) in raw_data.into_iter().enumerate() {
 
+        generate_raw_data_table(&(file_path.to_string() + &format!("/{}/{}_{}_Values.csv", "!raw_graph", &testname, &order[idx])), &emi, &types[idx])?;
+
         //begin plotting
-        let specific_path = file_path.to_string() + &format!("/{}/{}_{}.svg", OUTPUT_DIR_NAME, &testname, &order[idx]);
-        let root = SVGBackend::new(&specific_path, (DIM_X.try_into()?, DIM_Y.try_into()?)).into_drawing_area();
+        let specific_path = file_path.to_string() + &format!("/{}/{}_{}.svg", conf.output_dir_name, &testname, &order[idx]);
+        let root = SVGBackend::new(&specific_path, (conf.dim_x.try_into()?, conf.dim_y.try_into()?)).into_drawing_area();
         root.fill(&bg_color)?;
 
         let mut chart = ChartBuilder::on(&root)
             .caption(format!("{} {}", testname, &order[idx]), font_style.clone().color(&secondary_color))
-            .x_label_area_size(CHART_X_LABEL_AREA_SIZE)
-            .y_label_area_size(CHART_Y_LABEL_AREA_SIZE)
-            .margin(CHART_MARGIN)
+            .x_label_area_size(conf.chart_x_label_area_size)
+            .y_label_area_size(conf.chart_y_label_area_size)
+            .margin(conf.chart_margin)
             .build_cartesian_2d((f_min .. f_max).log_scale(), y_min..y_max)?;
 
         chart.configure_mesh()
         .x_desc(format!("Frequency / {}", types[idx].0))
         .y_desc(format!("Emissions / {}", types[idx].1))
         .axis_desc_style(font_style.clone().with_color(secondary_color))
-        .bold_line_style(secondary_color.mix(MESH_ALPHA).stroke_width(MESH_THICKNESS))
-        .light_line_style(secondary_color.mix(MESH_ALPHA).stroke_width(MESH_THICKNESS))
+        .bold_line_style(secondary_color.mix(conf.mesh_alpha).stroke_width(conf.mesh_thickness))
+        .light_line_style(secondary_color.mix(conf.mesh_alpha).stroke_width(conf.mesh_thickness))
         .disable_x_mesh() //only way to not render minor tickmark lines... sadly also disables major lines... gotta do em manually then...
         .y_max_light_lines(0)
         .x_max_light_lines(0)
@@ -347,7 +515,7 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
             chart.draw_series(
                 LineSeries::new(
                     vec![(x, y_min), (x, y_max)],
-                    secondary_color.mix(MESH_ALPHA)
+                    secondary_color.mix(conf.mesh_alpha)
                 )
             )?;
         }
@@ -360,7 +528,7 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
                     vec![(x, y_min), (x, y_max)],
                     0,
                     10,
-                    move |c| Circle::new(c, 1, secondary_color.mix(MESH_ALPHA).filled()),
+                    move |c| Circle::new(c, 1, secondary_color.mix(conf.mesh_alpha).filled()),
                 )
             )?;
         }
@@ -373,7 +541,7 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
         let (px_right, _)        = plotting_area.map_coordinate(&(f_max, y_min));
 
         // px_left/px_right and py_bottom are already in root pixel space
-        let tick_len = CUSTOM_TICKS_LENGTH;
+        let tick_len = conf.custom_ticks_length;
         root.draw(&PathElement::new(
             vec![(px_left, py_bottom), (px_left, py_bottom + tick_len)],
             secondary_color,
@@ -387,7 +555,7 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
         let left_style = TextStyle::from(font_style.clone()).pos(Pos::new(HPos::Left, VPos::Top));
         let right_style = TextStyle::from(font_style.clone()).pos(Pos::new(HPos::Right, VPos::Top));
 
-        let gap = CUSTOM_TICKS_GAP;
+        let gap = conf.custom_ticks_gap;
 
         root.draw_text(&f_min.to_string(), &left_style, (px_left, py_bottom + tick_len + gap))?;
         root.draw_text(&f_max.to_string(), &right_style, (px_right, py_bottom + tick_len + gap))?;
@@ -400,7 +568,7 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
                     vec![(f_min, y), (f_max, y)],
                     0,
                     10,
-                    move |c| Circle::new(c, 1, secondary_color.mix(MESH_ALPHA).filled()),
+                    move |c| Circle::new(c, 1, secondary_color.mix(conf.mesh_alpha).filled()),
                 ))?;
             }
         }
@@ -408,7 +576,7 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
         //chart actual data the cloning of the data could be avoided if the peak_search was adjusted to run once at the beginning
         //that would double the looping over limits. Its speed vs space and this configuration focuses more on speed.
         chart.draw_series(LineSeries::new(emi.clone(), &colors_plot[idx]))?
-            .label(order[idx].to_string() + " Measurement Results").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], colors_plot[idx].stroke_width(LEGEND_LINE_THICKNESS)));
+            .label(order[idx].to_string() + " Measurement Results").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], colors_plot[idx].stroke_width(conf.legend_line_thickness)));
 
 
         let mut peaks: Vec<Peak> = vec![];
@@ -450,8 +618,8 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
             //plotting the markers themselves (triangles)
 
             //triangle marker properties:
-            let half_width: i32 = MARKER_SIZE/2;
-            let height: i32 = MARKER_SIZE;
+            let half_width: i32 = conf.marker_size/2;
+            let height: i32 = conf.marker_size;
 
             let vertices = vec![
                 (pcx, pcy),                       // tip (bottom)
@@ -465,8 +633,8 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
             root.draw(&triangle)?;
 
             //the ordeal to position the number next to the triangle with (hopefully) little overlap
-            let style = if ppx != i32::MIN && (pcx - ppx) < MARKER_CLOSE_CRITERION_X && (pcy - ppy) < MARKER_CLOSE_CRITERION_Y {
-                if pnx != i32::MIN && (pnx - pcx) < MARKER_CLOSE_CRITERION_X && (pny - pcy) < MARKER_CLOSE_CRITERION_Y {
+            let style = if ppx != i32::MIN && (pcx - ppx) < conf.marker_close_criterion_x && (pcy - ppy) < conf.marker_close_criterion_y {
+                if pnx != i32::MIN && (pnx - pcx) < conf.marker_close_criterion_x && (pny - pcy) < conf.marker_close_criterion_y {
                     //both too close -> centered, they will be offset
                     TextStyle::from(font_style_marker.clone()).pos(Pos::new(HPos::Center, VPos::Bottom))
                 } else {
@@ -481,11 +649,11 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
                     }
                     */
                     //looks worse than if it just extends beyond the plot
-                    pcx += MARKER_CLOSE_SHIFT;
+                    pcx += conf.marker_close_shift;
                     TextStyle::from(font_style_marker.clone()).pos(Pos::new(HPos::Left, VPos::Bottom))
                 }
             } else {
-                if pnx != i32::MIN && (pnx - pcx) < MARKER_CLOSE_CRITERION_X && (pny - pcy) < MARKER_CLOSE_CRITERION_Y {
+                if pnx != i32::MIN && (pnx - pcx) < conf.marker_close_criterion_x && (pny - pcy) < conf.marker_close_criterion_y {
                     //only next too close -> align-left
                     //check if this would push it out of the screen
                     /*
@@ -497,7 +665,7 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
                     }
                     */
                     //looks worse than if it just extends beyond the plot
-                    pcx -= MARKER_CLOSE_SHIFT;
+                    pcx -= conf.marker_close_shift;
                     TextStyle::from(font_style_marker.clone()).pos(Pos::new(HPos::Right, VPos::Bottom))
                 } else {
                     //neither too close -> centered
@@ -506,7 +674,7 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
             };
 
             root.draw_text(
-                &format!("{}{}", MARKER_PREFIX, i+1),
+                &format!("{}{}", conf.marker_prefix, i+1),
                 &style,
                 (pcx, pcy - height)
             )?;
@@ -514,9 +682,9 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
 
             //now just place the peak info starting in the top left of the image
             let style = TextStyle::from(font_style_marker.clone()).pos(Pos::new(HPos::Left, VPos::Top));
-            let text_number = Text::new(format!("{}{})", MARKER_PREFIX, i + 1), ((MARKER_POS_OFFSET_BASE + 180 * i) as i32, MARKER_POS_OFFSET_LINE_BASE + MARKER_POS_OFFSET_LINE_SCALE), &style);
-            let text_freq = Text::new(format!("{:.2} {}", peaks[i].frequency, types[idx].0), ((MARKER_POS_OFFSET_BASE + MARKER_POS_OFFSET_BODY + MARKER_POS_OFFSET_SCALE * i) as i32, MARKER_POS_OFFSET_LINE_BASE), &style);
-            let text_level = Text::new(format!("{:.2} {}", peaks[i].level, types[idx].1), ((MARKER_POS_OFFSET_BASE + MARKER_POS_OFFSET_BODY + MARKER_POS_OFFSET_SCALE * i) as i32, MARKER_POS_OFFSET_LINE_BASE + 2 * MARKER_POS_OFFSET_LINE_SCALE), &style);
+            let text_number = Text::new(format!("{}{})", conf.marker_prefix, i + 1), ((conf.marker_pos_offset_base + 180 * i) as i32, conf.marker_pos_offset_line_base + conf.marker_pos_offset_line_scale), &style);
+            let text_freq = Text::new(format!("{:.2} {}", peaks[i].frequency, types[idx].0), ((conf.marker_pos_offset_base + conf.marker_pos_offset_body + conf.marker_pos_offset_scale * i) as i32, conf.marker_pos_offset_line_base), &style);
+            let text_level = Text::new(format!("{:.2} {}", peaks[i].level, types[idx].1), ((conf.marker_pos_offset_base + conf.marker_pos_offset_body + conf.marker_pos_offset_scale * i) as i32, conf.marker_pos_offset_line_base + 2 * conf.marker_pos_offset_line_scale), &style);
 
             root.draw(&text_number)?;
             root.draw(&text_freq)?;
@@ -524,7 +692,7 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
 
         }
 
-        //generate_table(&(file_path.to_string() + &format!("/{}/{}_{}.csv", "!raw_graph", &testname, &order[idx])), peaks)?;
+        generate_peak_table(&(file_path.to_string() + &format!("/{}/{}_{}_Limit_Breaks.csv", "!raw_graph", &testname, &order[idx])), peaks, &types[idx])?;
 
         //write peak values to graph
         //todo!
@@ -557,14 +725,35 @@ fn plotter(file_path: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/*fn generate_table(file_path: &str, peaks: Vec<Peak>) -> Result<(), Box<dyn Error>> {
-    let mut wtr = csv::Writer::from_path(file_path)?;
-    for peak in &peaks {
-        wtr.serialize(peak)?;
+fn generate_raw_data_table(file_path: &str, data: &Vec<(f64, f64)>, types: &(String, String)) -> Result<(), Box<dyn Error>> {
+
+    let mut file = File::create(file_path)?;
+    file.write_all(&[0xEF, 0xBB, 0xBF])?; //UTF-8 BOM
+
+    let mut wtr = WriterBuilder::new().from_writer(file);
+
+    wtr.serialize("frequency,value")?;
+    for datum in data {
+        wtr.serialize(format!("{:.2} {},{:.2} {}",datum.0, &types.0, datum.1, &types.1))?;
     }
     wtr.flush()?;
     Ok(())
-}*/
+}
+
+fn generate_peak_table(file_path: &str, peaks: Vec<Peak>, types: &(String, String)) -> Result<(), Box<dyn Error>> {
+
+    let mut file = File::create(file_path)?;
+    file.write_all(&[0xEF, 0xBB, 0xBF])?; //UTF-8 BOM
+
+    let mut wtr = WriterBuilder::new().from_writer(file);
+
+    wtr.serialize("limit_name,frequency,value,limit_value")?;
+    for peak in &peaks {
+        wtr.serialize(format!("{},{:.2} {},{:.2} {},{:.2} {}", peak.limit_name, peak.frequency, types.0, peak.level, types.1, peak.limit_level, types.1))?;
+    }
+    wtr.flush()?;
+    Ok(())
+}
 
 fn log_minor_lines(min: f64, max: f64, max_light_lines: usize) -> Vec<f64> {
     let mut result = Vec::new();
