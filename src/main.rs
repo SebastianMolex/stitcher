@@ -92,16 +92,6 @@ struct RawData {
     values: Vec<Vec<(f64, f64)>>,
 }
 
-struct RawElem {
-    types: (String, String),
-    values: Vec<(f64, f64)>,
-}
-
-struct RawDataIter {
-    types: std::vec::IntoIter<(String, String)>,
-    values: std::vec::IntoIter<Vec<(f64, f64)>>,
-}
-
 #[derive(Debug, PartialEq)]
 struct Limit {
     name: String,
@@ -114,29 +104,6 @@ struct Peak {
     level: f64,
     limit_name: String,
     limit_level: f64,
-}
-
-impl Iterator for RawDataIter {
-    type Item = RawElem;
-    fn next(&mut self) -> Option<Self::Item> {
-        match (self.types.next(), self.values.next()) {
-            (Some(types), Some(values)) => Some(RawElem{ types, values }),
-            _ => None,
-
-        }
-    }
-}
-
-impl IntoIterator for RawData {
-    type Item = RawElem;
-    type IntoIter = RawDataIter;
-
-    fn into_iter(self) -> Self::IntoIter {
-        RawDataIter{
-            types: self.types.into_iter(),
-            values: self.values.into_iter(),
-        }
-    }
 }
 
 
