@@ -387,8 +387,6 @@ fn plotter(file_path: &Path) -> Result<(), Box<dyn Error>> {
 
     let conf = CONFIG.get().unwrap();
 
-    let order = ["PK", "AV", "QP"];
-
     //get raw_data and limits from test:
     //it is critical that raw_datas index matches the respective limits index. Sort logic goes through PK/AV/QP shortcut in limit name in /System of test.
 
@@ -405,6 +403,33 @@ fn plotter(file_path: &Path) -> Result<(), Box<dyn Error>> {
         return Ok(()); //ok and not error, as this can just be ignored and should not force a stop, like an error would.
     }
 
+    //go through limits and add PK, AV and/or QP to the stack if it exists as a limit at all.
+
+    let mut order = vec![];
+
+    for lim in &limits {
+        match &lim.name {
+            name if name.contains("PK") => {
+                order.push("PK")
+            },
+            name if name.contains("AV") => {
+                order.push("AV")
+            },
+            name if name.contains("QP") => {
+                order.push("QP")
+            },
+            _ => {},
+        }
+    }
+
+    order.sort_by_key(|&elem| {
+        match elem {
+            "PK" => 0,
+            "AV" => 1,
+            "QP" => 2,
+            _ => u8::MAX,
+        }
+    });
 
 
     //plot pre-setup
