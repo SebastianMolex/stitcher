@@ -20,14 +20,17 @@ use std::{
     sync::OnceLock
 };
 
-use csv::WriterBuilder;
+use csv::WriterBuilder; //.csv creation
 
+//decoding R&S UTF-16-Little-Endian encoding
 use encoding_rs::UTF_16LE;
 use encoding_rs_io::DecodeReaderBytesBuilder;
 
+//plot creation
 use plotters::prelude::*;
 use plotters::style::text_anchor::{Pos, HPos, VPos};
 
+//reading and writing the .ini
 use serde::{Serialize, Deserialize};
 
 
@@ -89,7 +92,7 @@ struct Config { //config file data
 #[derive(Debug, PartialEq)]
 struct RawData {
     types: Vec<(String, String)>,
-    values: Vec<Vec<(f64, f64)>>,
+    values: Vec<Vec<(f64, Option<f64>)>>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -124,10 +127,10 @@ fn main() {
 
     let mut paths_to_plot: Vec<PathBuf> = vec![];
     let path = path::absolute(&conf.test_dir).unwrap();
-    search_for_all_test_paths(&path, &mut paths_to_plot);
+    search_for_all_test_paths(&path, &mut paths_to_plot); //also finds immunity tests
 
     for dir in paths_to_plot {
-        plotter(&dir).unwrap();
+        plotter(&dir).unwrap(); //only plots emi tests, immunity tests get filtered in get_raw_data()
     }
 
     println!("| Message! | all plots generated without error. terminating...");
@@ -227,7 +230,7 @@ fn search_for_all_test_paths(base_dir: &PathBuf, result: &mut Vec<PathBuf>) { //
             if path.is_dir() {
                 search_for_all_test_paths(&path, result);
             } else {
-                if let Some(file_name) = path.file_name() && file_name  == OsStr::new("Preview Result 1.Result") {
+                if let Some(file_name) = path.file_name() && (file_name  == OsStr::new("Preview Result 1.Result") || file_name  == OsStr::new("Result Table.Result")) {
                     //found the file, add dir as a test.
                     result.push(path.parent().unwrap().to_path_buf());
                 }
@@ -239,12 +242,21 @@ fn search_for_all_test_paths(base_dir: &PathBuf, result: &mut Vec<PathBuf>) { //
 fn get_raw_data(file_path: &str) -> RawData { //(Vec<(Freq Unit: String, Level Unit: String)>, Vec<Vec<(Freq: f64, Level: f64)>>)
     let mut output_values = vec![];
     let mut output_types = vec![];
-    let text = read_utf16le_file(&(file_path.to_string() + "/Preview Result 1.Result")).unwrap();
+    //if preview results exists, it was an auto-test, else it is a manual test or an immunity one.
+    let text = if Path::new(&(file_path.to_string() + "/Preview Result 1.Result")).exists() {
+        read_utf16le_file(&(file_path.to_string() + "/Preview Result 1.Result")).unwrap()
+    } else {
+        //this might be an immunity test, return early with still empty output if it is:
+        if Path::new(&(file_path.to_string() + "/Result Table_EutFailures.Result")).exists() {return RawData { types: output_types, values: output_values };}
+        //else read the file and continue as normal
+        read_utf16le_file(&(file_path.to_string() + "/Result Table.Result")).unwrap()
+    };
+
     let mut is_detector = vec![];
     let mut prefix_done = false;
     let mut unit_line = "".to_string(); //since the defining typeline that tells the meaning of this lines comes after if, it has to be stored until that line is encountered
 
-    for line in text.lines() {
+    for (row_id, line) in text.lines().enumerate() {
         if line == "[TableValues]" { //table begins, set flag so the next checks are skipped to save cycles.
             prefix_done = true;
             continue;
@@ -300,7 +312,14 @@ fn get_raw_data(file_path: &str) -> RawData { //(Vec<(Freq Unit: String, Level U
 
         for i in 1..line_parts.len() {
             output_values[i-1].push( //-1 so index remains zero index'd despite loop starting at one.
-                (line_parts[0].parse::<f64>().unwrap(), line_parts[i].parse::<f64>().unwrap())
+                match (line_parts[0].parse::<f64>(), line_parts[i].parse::<f64>()) { //--- can still be in the data, indicating a gap in the plot. Mark this via None's
+                    (Ok(freq), Ok(level)) => {(freq, Some(level))}, //nominal value
+                    (Ok(freq), Err(_)) => {(freq, None)}, //gap
+                    _ => {
+                        println!("| Warning! | unexpected value encountered in {}; column: {}; row: {}", file_path, i, row_id);
+                        continue;
+                    } //should probably not happen
+                }
             );
         }
     }
@@ -351,7 +370,7 @@ fn get_limits(file_path: &str) -> Vec<Limit> {
     output
 }
 
-fn peak_search(data: &[(f64, f64)], limit: &Limit, limit_start_index: usize, limit_end_index: usize) -> Option<Peak>{
+fn peak_search(data: &[(f64, Option<f64>)], limit: &Limit, limit_start_index: usize, limit_end_index: usize) -> Option<Peak>{
     //for each frequency start/end point pair this finds the maximum value of data in this range then checks if that exceeds the limit.
     //only works if the limit is monotonic between start and end
     //if all are true adds it as a point to the output.
@@ -367,11 +386,11 @@ fn peak_search(data: &[(f64, f64)], limit: &Limit, limit_start_index: usize, lim
         //log-log-interpolation using binary log for fast calculation. formula doesnt differ for other log bases due to log properties.
         let interpolation_exponent = f64::log2(limit_end.1 / limit_start.1) / f64::log2(limit_end.0 / limit_start.0); //k = log(y2/y1)/log(x2/x1) ->positive if monotonically increasing, negative if monotonically decreasing.
         let interpolated_limit = limit_start.1 * (point.0 / limit_start.1).powf(interpolation_exponent); //y = y1 * (x/x1)^k
-        if point.1 >= interpolated_limit && point.1 > result.unwrap_or(((-1f64, f64::MIN), -1f64)).0.1{
-            //breaks limit and is greater than last break
-            result = Some((*point, interpolated_limit));
-        }
-
+        if let Some(point_1) = point.1
+            && point_1 >= interpolated_limit && point_1 > result.unwrap_or(((-1f64, f64::MIN), -1f64)).0.1{
+                //breaks limit and is greater than last break
+                result = Some(((point.0, point_1), interpolated_limit));
+            }
     }
 
     result.map(|result| Peak {
@@ -413,9 +432,8 @@ fn plotter(file_path: &Path) -> Result<(), Box<dyn Error>> {
     let (types, raw_data) = (raw.types, raw.values);
     let limits: Vec<Limit> = get_limits(file_path);
 
-    if raw_data.is_empty() { //most likely case, Preview Result 1.Result is in binary format, so quit
-        println!("| Warning! | Cannot fetch raw data for {}.", file_path);
-        println!("             It is most likely still in binary format; Please re-save the test without the EMC32 flag: \"Extras>Options>File/Test>Save EMI Result Tables > 10000 Lines in Binary Format\"");
+    if raw_data.is_empty() { //if true most likely case: Preview Result 1.Result is in binary format, so quit
+        println!("| Warning! | Cannot fetch raw data for {}. It is most likely still in binary format!", file_path);
         return Ok(()); //ok and not error, as this can just be ignored and should not force a stop, like an error would.
     }
 
@@ -583,8 +601,27 @@ fn plotter(file_path: &Path) -> Result<(), Box<dyn Error>> {
 
         //chart actual data the cloning of the data could be avoided if the peak_search was adjusted to run once at the beginning
         //that would double the looping over limits. Its speed vs space and this configuration focuses more on speed.
-        chart.draw_series(LineSeries::new(emi.clone(), &colors_plot[idx]))?
-            .label(order[idx].to_string() + " Measurement Results").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], colors_plot[idx].stroke_width(conf.legend_line_thickness)));
+        let mut emi_split: Vec<Vec<(f64, f64)>> = Vec::new();
+        let mut current: Vec<(f64, f64)> = Vec::new();
+
+        for (freq, level_opt) in emi.iter() {
+            if let Some(level) = level_opt {
+                current.push((*freq, *level));
+            } else if !current.is_empty() {
+                emi_split.push(std::mem::take(&mut current));
+            }
+        }
+        if !current.is_empty() {
+            emi_split.push(current);
+        }
+        let mut temp = None;
+        for emi_graph in emi_split {
+            temp = Some(chart.draw_series(LineSeries::new(emi_graph.clone(), &colors_plot[idx]))?);
+        }
+        if let Some(val) = temp {
+            val.label(order[idx].to_string() + " Measurement Results").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], colors_plot[idx].stroke_width(conf.legend_line_thickness)));
+        }
+
 
 
         let mut peaks: Vec<Peak> = vec![];
@@ -733,7 +770,7 @@ fn plotter(file_path: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn generate_raw_data_table(file_path: &str, data: &Vec<(f64, f64)>, types: &(String, String)) -> Result<(), Box<dyn Error>> {
+fn generate_raw_data_table(file_path: &str, data: &Vec<(f64, Option<f64>)>, types: &(String, String)) -> Result<(), Box<dyn Error>> {
 
     let mut file = File::create(file_path)?;
     file.write_all(&[0xEF, 0xBB, 0xBF])?; //UTF-8 BOM
@@ -742,7 +779,9 @@ fn generate_raw_data_table(file_path: &str, data: &Vec<(f64, f64)>, types: &(Str
 
     wtr.serialize("frequency,value")?;
     for datum in data {
-        wtr.serialize(format!("{:.2} {},{:.2} {}",datum.0, &types.0, datum.1, &types.1))?;
+        if let Some(datum_1) = datum.1 {
+            wtr.serialize(format!("{:.2} {},{:.2} {}",datum.0, &types.0, datum_1, &types.1))?;
+        }
     }
     wtr.flush()?;
     Ok(())
@@ -798,10 +837,10 @@ fn get_files_with_extension(dir_path: &str, extension: &str) -> Result<Vec<Strin
     Ok(files.iter().map(|v| v.to_str().unwrap().to_owned()).collect())
 }
 
-fn find_min_max(data: &[Vec<(f64, f64)>], limits: &[Limit]) -> Option<(f64, f64)> {
+fn find_min_max(data: &[Vec<(f64, Option<f64>)>], limits: &[Limit]) -> Option<(f64, f64)> {
 
     let data: Vec<Vec<f64>> = data.iter().map(|inner|
-        inner.iter().map(|(_, val)|
+        inner.iter().filter_map(|(_, val)|
             val.to_owned()
         ).collect::<Vec<f64>>()
     ).collect();
