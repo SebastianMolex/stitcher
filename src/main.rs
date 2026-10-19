@@ -240,6 +240,7 @@ fn get_raw_data(file_path: &str) -> RawData { //(Vec<(Freq Unit: String, Level U
     let mut output_values = vec![];
     let mut output_types = vec![];
     let text = read_utf16le_file(&(file_path.to_string() + "/Preview Result 1.Result")).unwrap();
+    let mut is_detector = vec![];
     let mut prefix_done = false;
     let mut unit_line = "".to_string(); //since the defining typeline that tells the meaning of this lines comes after if, it has to be stored until that line is encountered
 
@@ -268,21 +269,36 @@ fn get_raw_data(file_path: &str) -> RawData { //(Vec<(Freq Unit: String, Level U
                     }
                 }
                 //finished generation of types
+            } else if line.contains("Detector=") && !line.contains("Indicate") {
+                //store which table rows are actual detectors in a list.
+                let mut detector_parts: Vec<&str> = line.split(['\t', ' ']).collect();
+                detector_parts.remove(0);
+                for part in detector_parts {
+                    if !part.is_empty() {
+                        is_detector.push(part.parse::<i32>().is_ok_and(|n| n != 0)); // push true if elem is a non-zero number else push false
+                    }
+                }
             }
             continue;
         }
         //value table handling:
 
         //read line to output
-        let line = line.split(['L', 'N', 'V', 'H']).collect::<Vec<_>>().first().unwrap().to_owned(); //cuts off when L(1) or N is encountered in the table
-        let line_parts: Vec<&str> = line.split(['\t', ' ']).collect();
+        //let line = line.split(['L', 'N', 'V', 'H']).collect::<Vec<_>>().first().unwrap().to_owned(); //Too naive, current probe tests do not have this cuts off when L(1) or N is encountered in the table
+        let mut line_parts: Vec<&str> = line.split(['\t', ' ']).collect();
+        is_detector[0] = true; // re-add frequency-column to be kept
+
+        let mut is_detector_clone = is_detector.clone();
+        line_parts.retain(move |_| is_detector_clone.remove(0)); //remove everything that is not a detector
+
+
 
         //pre-create vectors
         if output_values.is_empty() {
-            output_values = vec![Vec::new(); line_parts.len()-2]; //-2 since no extra place for frequency column(-1) and the last element is always empty(-1)
+            output_values = vec![Vec::new(); line_parts.len()-1]; //-1 since no extra place for frequency column
         }
 
-        for i in 1..line_parts.len() - 1 { //-1 since the last element is always empty
+        for i in 1..line_parts.len() {
             output_values[i-1].push( //-1 so index remains zero index'd despite loop starting at one.
                 (line_parts[0].parse::<f64>().unwrap(), line_parts[i].parse::<f64>().unwrap())
             );
