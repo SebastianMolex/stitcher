@@ -39,7 +39,8 @@ static CONFIG: OnceLock<Config> = OnceLock::new(); //to store config file
 #[derive(Debug, Serialize, Deserialize)]
 struct Config { //config file data
     test_dir: String,
-    output_dir_name: String,
+    graph_output_dir_name: String,
+    csvs_output_dir_name: String,
 
     dim_x: i32,
     dim_y: i32,
@@ -112,42 +113,93 @@ struct Peak {
 
 
 fn main() {
-    if !Path::new("config.ini").exists() {
+    if !Path::new("config.ini").exists() {//if config doesnt exist, create it
         println!("| Warning! | no config found, generating new config");
-        create_new_ini().unwrap();
-        println!("| Message! | config generated, terminating... relaunch to generate plot files!");
-        sleep(Duration::from_secs(5));
-        return; //halts execution
-    } //if config doesnt exist, create it
+        match create_new_ini() {
+            Ok(_) => {
+                println!("| Message! | config generated");
+                sleep(Duration::from_secs(1));
+            },
+            Err(_) => {
+                println!("| Error! | could not generate config");
+                sleep(Duration::from_secs(5));
+                return;
+            },
+        }
+    }
     println!("| Message! | loading config...");
     get_config(); //loads config to global static
-    let conf = CONFIG.get().unwrap();
+    let conf = match CONFIG.get() {
+        Some(v) => {v},
+        None => {
+            println!("| Error! | could not load config");
+            sleep(Duration::from_secs(5));
+            return;
+        },
+    };
     println!("| Message! | config found, generating plots...");
     //plotting:
 
     let mut paths_to_plot: Vec<PathBuf> = vec![];
-    let path = path::absolute(&conf.test_dir).unwrap();
-    search_for_all_test_paths(&path, &mut paths_to_plot); //also finds immunity tests
+    let path = match path::absolute(&conf.test_dir) {
+        Ok(v) => {v},
+        Err(_) => {
+            println!("| Error! | could not load test directory from config");
+            sleep(Duration::from_secs(5));
+            return;
+        },
+    };
+    match search_for_all_test_paths(&path, &mut paths_to_plot) { //also finds immunity tests
+        Ok(_) => {println!("| Message! | all plots scanned, begin plotting...");},
+        Err(_) => {
+            println!("| Error! | test path crawling failed");
+            sleep(Duration::from_secs(5));
+            return;
+        },
+    };
 
     for dir in paths_to_plot {
-        plotter(&dir).unwrap(); //only plots emi tests, immunity tests get filtered in get_raw_data()
+        match plotter(&dir) { //only plots emi tests, immunity tests get filtered in get_raw_data()
+            Ok(_) => {},
+            Err(_) => {
+                println!("| Error! | could not generate graph for {}", dir.to_string_lossy());
+                sleep(Duration::from_secs(5));
+                return;
+            },
+        }
     }
 
-    println!("| Message! | all plots generated without error. terminating...");
+    println!("| Message! | all plots generated. Closing software...");
     sleep(std::time::Duration::from_secs(5));
 }
 
 fn get_config() -> &'static Config {
     CONFIG.get_or_init(|| {
-        let content = std::fs::read_to_string("config.ini").unwrap();
-        serde_ini::from_str(&content).unwrap()
+        let content = match std::fs::read_to_string("config.ini") {
+            Ok(v) => {v},
+            Err(_) => {
+                println!("| Error! | could not load config into global context");
+                sleep(Duration::from_secs(5));
+                panic!();
+            },
+        };
+        match serde_ini::from_str(&content){
+            Ok(v) => {v},
+            Err(_) => {
+                println!("| Error! | could not parse config");
+                sleep(Duration::from_secs(5));
+                panic!();
+            },
+
+        }
     })
 }
 
 fn create_new_ini() -> Result<(), Box<dyn Error>>{
     let config = Config { //default values
         test_dir: "../../../../Tests/".to_string(),
-        output_dir_name: "!raw_graph".to_string(),
+        graph_output_dir_name: "!raw_graph".to_string(),
+        csvs_output_dir_name: "!csvs".to_string(),
         dim_x: 1920,
         dim_y: 1080,
         offset_y_top: 20.0,
@@ -223,33 +275,34 @@ fn read_utf16le_file(path: &str) -> Result<String, std::io::Error> {
 //recursive folder search
 //probably takes decades if given a root folder of a drive.
 //this should only take the folder where tests are actually expected to be.
-fn search_for_all_test_paths(base_dir: &PathBuf, result: &mut Vec<PathBuf>) { //emissions tests are all such tests, that have a "Preview Result 1.Result" file.
+fn search_for_all_test_paths(base_dir: &PathBuf, result: &mut Vec<PathBuf>) -> Result<(), Box<dyn Error>> { //emissions tests are all such tests, that have a "Preview Result 1.Result" file.
     if let Ok(dirs) = fs::read_dir(base_dir){
         for entry in dirs.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                search_for_all_test_paths(&path, result);
+                search_for_all_test_paths(&path, result)?;
             } else {
                 if let Some(file_name) = path.file_name() && (file_name  == OsStr::new("Preview Result 1.Result") || file_name  == OsStr::new("Result Table.Result")) {
                     //found the file, add dir as a test.
-                    result.push(path.parent().unwrap().to_path_buf());
-                }
-            }
+                    result.push(path.parent().ok_or(format!("could not search given test path: {}", path.to_string_lossy()))?.to_path_buf());
+                } //given error occurs only if some clown places a result in a drive root and sets that as the Tests directory in the config.
+            }     //actually even then it shouldn't trigger as the .parent() should resolve to the drive's root, no?
         }
     }
+    Ok(())
 }
 
-fn get_raw_data(file_path: &str) -> RawData { //(Vec<(Freq Unit: String, Level Unit: String)>, Vec<Vec<(Freq: f64, Level: f64)>>)
+fn get_raw_data(file_path: &str) -> Result<RawData, Box<dyn Error>> { //(Vec<(Freq Unit: String, Level Unit: String)>, Vec<Vec<(Freq: f64, Level: f64)>>)
     let mut output_values = vec![];
     let mut output_types = vec![];
     //if preview results exists, it was an auto-test, else it is a manual test or an immunity one.
     let text = if Path::new(&(file_path.to_string() + "/Preview Result 1.Result")).exists() {
-        read_utf16le_file(&(file_path.to_string() + "/Preview Result 1.Result")).unwrap()
+        read_utf16le_file(&(file_path.to_string() + "/Preview Result 1.Result"))?
     } else {
         //this might be an immunity test, return early with still empty output if it is:
-        if Path::new(&(file_path.to_string() + "/Result Table_EutFailures.Result")).exists() {return RawData { types: output_types, values: output_values };}
+        if Path::new(&(file_path.to_string() + "/Result Table_EutFailures.Result")).exists() {return Ok(RawData { types: output_types, values: output_values });}
         //else read the file and continue as normal
-        read_utf16le_file(&(file_path.to_string() + "/Result Table.Result")).unwrap()
+        read_utf16le_file(&(file_path.to_string() + "/Result Table.Result"))?
     };
 
     let mut is_detector = vec![];
@@ -272,10 +325,10 @@ fn get_raw_data(file_path: &str) -> RawData { //(Vec<(Freq Unit: String, Level U
                 for part in types_line_parts {
                     match part {
                         "Frequency" => {
-                            freq_unit = units_line_parts.next().unwrap().to_string();
+                            freq_unit = units_line_parts.next().ok_or("could not fetch frequency unit")?.to_string();
                         },
                         "Level" => {
-                            output_types.push((freq_unit.clone(), units_line_parts.next().unwrap().to_string()))
+                            output_types.push((freq_unit.clone(), units_line_parts.next().ok_or("could not fetch level unit")?.to_string()))
                         },
                         _ => {},
                     }
@@ -323,20 +376,20 @@ fn get_raw_data(file_path: &str) -> RawData { //(Vec<(Freq Unit: String, Level U
             );
         }
     }
-    RawData { types: output_types, values: output_values }
+    Ok(RawData { types: output_types, values: output_values })
 }
 
-fn get_limits(file_path: &str) -> Vec<Limit> {
+fn get_limits(file_path: &str) -> Result<Vec<Limit>, Box<dyn Error>> {
     let mut output: Vec<Limit> = vec![];
 
-    let file_paths: Vec<String> = get_files_with_extension(&(file_path.to_string() + "/System"), "LimitLine").unwrap();
+    let file_paths: Vec<String> = get_files_with_extension(&(file_path.to_string() + "/System"), "LimitLine")?;
 
     for (j, file_path) in file_paths.into_iter().enumerate() {
-        let text = read_utf16le_file(&file_path).unwrap();
+        let text = read_utf16le_file(&file_path)?;
         let mut prefix_done = false;
 
         //get limit type from filename:
-        let name = Path::new(&file_path).file_stem().and_then(|name| name.to_str()).unwrap().to_string();
+        let name = Path::new(&file_path).file_stem().and_then(|name| name.to_str()).ok_or("could not convert filepath to text")?.to_string();
 
         output.push(Limit { name, values: vec![] });
 
@@ -360,14 +413,14 @@ fn get_limits(file_path: &str) -> Vec<Limit> {
             let prev_line_parts: Vec<&str> = prev_line.split(['\t', ' ']).collect();
 
             if curr_line_parts[0] != "---" && curr_line_parts[1] != "---" && prev_line_parts[0] != "---" && prev_line_parts[1] != "---" {
-                output[j].values.push((prev_line_parts[0].parse::<f64>().unwrap(), prev_line_parts[1].parse::<f64>().unwrap()));
-                output[j].values.push((curr_line_parts[0].parse::<f64>().unwrap(), curr_line_parts[1].parse::<f64>().unwrap()));
+                output[j].values.push((prev_line_parts[0].parse::<f64>()?, prev_line_parts[1].parse::<f64>()?));
+                output[j].values.push((curr_line_parts[0].parse::<f64>()?, curr_line_parts[1].parse::<f64>()?));
             }
             prev_line = curr_line;
         }
     }
 
-    output
+    Ok(output)
 }
 
 fn peak_search(data: &[(f64, Option<f64>)], limit: &Limit, limit_start_index: usize, limit_end_index: usize) -> Option<Peak>{
@@ -420,17 +473,17 @@ fn plotter(file_path: &Path) -> Result<(), Box<dyn Error>> {
     let file_path = file_path.to_string_lossy();
     let file_path = &file_path.as_ref();
 
-    let conf = CONFIG.get().unwrap();
+    let conf = CONFIG.get().ok_or("could not fetch config")?;
 
     //get raw_data and limits from test:
     //it is critical that raw_datas index matches the respective limits index. Sort logic goes through PK/AV/QP shortcut in limit name in /System of test.
 
     //extract testname from file_path
-    let testname = Path::new(file_path).file_name().and_then(|name| name.to_str()).unwrap();
+    let testname = Path::new(file_path).file_name().and_then(|name| name.to_str()).ok_or("could not convert filepath to text")?;
 
-    let raw = get_raw_data(file_path);
+    let raw = get_raw_data(file_path)?;
     let (types, raw_data) = (raw.types, raw.values);
-    let limits: Vec<Limit> = get_limits(file_path);
+    let limits: Vec<Limit> = get_limits(file_path)?;
 
     if raw_data.is_empty() { //if true most likely case: Preview Result 1.Result is in binary format, so quit
         println!("| Warning! | Cannot fetch raw data for {}. It is most likely still in binary format!", file_path);
@@ -478,10 +531,10 @@ fn plotter(file_path: &Path) -> Result<(), Box<dyn Error>> {
 
     let freqs_plot: Vec<f64> = raw_data[0].iter().map(|(first, _)| first.to_owned()).collect();
 
-    let f_min = freqs_plot.first().unwrap().to_owned();
-    let f_max = freqs_plot.last().unwrap().to_owned();
+    let f_min = freqs_plot.first().ok_or("could not load first frequency")?.to_owned();
+    let f_max = freqs_plot.last().ok_or("could not load last frequency")?.to_owned();
 
-    let (mut y_min, mut y_max) = find_min_max(&raw_data, &limits).unwrap();
+    let (mut y_min, mut y_max) = find_min_max(&raw_data, &limits).ok_or("could not find minimum and maximum of data")?;
 
     y_min = ((y_min - conf.offset_y_bot)/10.0).round() * 10.0;
     y_max = ((y_max + conf.offset_y_top)/10.0).round() * 10.0;
@@ -491,18 +544,27 @@ fn plotter(file_path: &Path) -> Result<(), Box<dyn Error>> {
     let font_style = (conf.style_general_type.as_str(), conf.style_general_size).into_font();
     let font_style_marker = (conf.style_marker_type.as_str(), conf.style_marker_size).into_font();
 
-    if conf.output_dir_name.is_empty(){panic!()};
+    if conf.graph_output_dir_name.is_empty(){panic!()};
+    if conf.csvs_output_dir_name.is_empty(){panic!()};
 
-    fs::create_dir_all(file_path.to_string() + "/" + &conf.output_dir_name)?;
+    fs::create_dir_all(file_path.to_string() + "/" + &conf.graph_output_dir_name)?;
+    fs::create_dir_all(file_path.to_string() + "/" + &conf.csvs_output_dir_name)?;
 
     //for each trace make a graphic:
 
     for (idx, emi) in raw_data.into_iter().enumerate() {
 
-        generate_raw_data_table(&(file_path.to_string() + &format!("/{}/{}_{}_Values.csv", "!raw_graph", &testname, &order[idx])), &emi, &types[idx])?;
+        generate_raw_data_table(file_path, &conf.csvs_output_dir_name, testname, order[idx], &emi, &types[idx])?;
 
         //begin plotting
-        let specific_path = file_path.to_string() + &format!("/{}/{}_{}.svg", conf.output_dir_name, &testname, &order[idx]);
+        //let specific_path = file_path.to_string() + &format!("/{}/{}_{}.svg", conf.output_dir_name, &testname, &order[idx]);
+        //optional pulling out of the graphs to a more central location:
+        let specific_path = crawl_up_to_tests(file_path, &conf.graph_output_dir_name, testname, &(order[idx].to_string() + ".svg"))?;
+
+        fs::create_dir_all(Path::new(&specific_path).parent().ok_or("could not get root folder of graph destination")?.to_string_lossy().into_owned())?;
+        println!("| Message! | Generating: {specific_path}");
+
+        //create plot
         let root = SVGBackend::new(&specific_path, (conf.dim_x.try_into()?, conf.dim_y.try_into()?)).into_drawing_area();
         root.fill(&bg_color)?;
 
@@ -737,7 +799,7 @@ fn plotter(file_path: &Path) -> Result<(), Box<dyn Error>> {
 
         }
 
-        generate_peak_table(&(file_path.to_string() + &format!("/{}/{}_{}_Limit_Breaks.csv", "!raw_graph", &testname, &order[idx])), peaks, &types[idx])?;
+        generate_peak_table(file_path, &conf.csvs_output_dir_name, testname, order[idx], peaks, &types[idx])?;
 
         //write peak values to graph
         //todo!
@@ -770,7 +832,7 @@ fn plotter(file_path: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn generate_raw_data_table(file_path: &str, data: &Vec<(f64, Option<f64>)>, types: &(String, String)) -> Result<(), Box<dyn Error>> {
+/*fn generate_raw_data_table(file_path: &str, data: &Vec<(f64, Option<f64>)>, types: &(String, String)) -> Result<(), Box<dyn Error>> {
 
     let mut file = File::create(file_path)?;
     file.write_all(&[0xEF, 0xBB, 0xBF])?; //UTF-8 BOM
@@ -785,9 +847,104 @@ fn generate_raw_data_table(file_path: &str, data: &Vec<(f64, Option<f64>)>, type
     }
     wtr.flush()?;
     Ok(())
+}*/
+
+fn crawl_up_to_tests(file_path: &str, dir_name: &str, test_name: &str, specifier: &str) -> Result<String, Box<dyn Error>> {
+    let mut output = vec![];
+    let path = Path::new(file_path);
+    let mut current = path.ancestors();
+    let base;
+
+    loop{
+        match current.next() {
+            Some(v) => {
+                let name = match v.file_name() {
+                    Some(val) => {val},
+                    None => {
+                        println!("| Error! | could not read folder name during crawl");
+                        sleep(Duration::from_secs(5));
+                        panic!();
+                    },
+                };
+                if name == "Tests"{
+                    base = current.next();
+                    break;
+                }
+                output.push(name.to_string_lossy().to_string());
+            },
+            None => {return Err("no \"tests\" folder found during crawl")?},
+        }
+    }
+    if let Some(base) = base {
+        output.remove(0);
+        let mut base = base.to_string_lossy().to_string();
+        base += "\\Tests\\";
+        match output.pop() {
+            Some(v) => {base += &v;},
+            None => {
+                base = file_path.to_string(); //Tests has been found but no sub-folders between that an this test? -> its a test in Tests root so reset path
+            },
+        }
+
+        base += "\\";
+        base += dir_name;
+
+        while let Some(dir) = output.pop() {
+            base += "\\";
+            base += &dir;
+        }
+
+        base += "\\";
+        base += test_name;
+        base += "_";
+        base += specifier;
+        Ok(base)
+    } else {
+        Err("could not get root after crawl")?
+    }
+
 }
 
-fn generate_peak_table(file_path: &str, peaks: Vec<Peak>, types: &(String, String)) -> Result<(), Box<dyn Error>> {
+fn generate_raw_data_table(file_path: &str, dir_name: &str, test_name: &str, specifier: &str, data: &Vec<(f64, Option<f64>)>, types: &(String, String)) -> Result<(), Box<dyn Error>> {
+
+    let file_name = crawl_up_to_tests(file_path, dir_name, test_name, &(specifier.to_string() + "_Values.csv"))?;
+    fs::create_dir_all(Path::new(&file_name).parent().ok_or("could not get root folder of raw_data csv destination")?.to_string_lossy().into_owned())?;
+    let mut file = File::create(&file_name)?;
+
+    file.write_all(&[0xEF, 0xBB, 0xBF])?; //UTF-8 BOM
+
+    let mut wtr = WriterBuilder::new().from_writer(file);
+
+    wtr.serialize("frequency,value")?;
+    for datum in data {
+        if let Some(datum_1) = datum.1 {
+            wtr.serialize(format!("{:.2} {},{:.2} {}",datum.0, &types.0, datum_1, &types.1))?;
+        }
+    }
+    wtr.flush()?;
+    Ok(())
+}
+
+fn generate_peak_table(file_path: &str, dir_name: &str, test_name: &str, specifier: &str, peaks: Vec<Peak>, types: &(String, String)) -> Result<(), Box<dyn Error>> {
+
+
+    let file_name = crawl_up_to_tests(file_path, dir_name, test_name, &(specifier.to_string() + "_Limit_Breaks.csv"))?;
+    fs::create_dir_all(Path::new(&file_name).parent().ok_or("could not get root folder of peak_data csv destination")?.to_string_lossy().into_owned())?;
+    let mut file = File::create(&file_name)?;
+
+    file.write_all(&[0xEF, 0xBB, 0xBF])?; //UTF-8 BOM
+
+    let mut wtr = WriterBuilder::new().from_writer(file);
+
+    wtr.serialize("limit_name,frequency,value,limit_value")?;
+    for peak in &peaks {
+        wtr.serialize(format!("{},{:.2} {},{:.2} {},{:.2} {}", peak.limit_name, peak.frequency, types.0, peak.level, types.1, peak.limit_level, types.1))?;
+    }
+    wtr.flush()?;
+    Ok(())
+}
+
+/*fn generate_peak_table(file_path: &str, peaks: Vec<Peak>, types: &(String, String)) -> Result<(), Box<dyn Error>> {
 
     let mut file = File::create(file_path)?;
     file.write_all(&[0xEF, 0xBB, 0xBF])?; //UTF-8 BOM
@@ -800,7 +957,7 @@ fn generate_peak_table(file_path: &str, peaks: Vec<Peak>, types: &(String, Strin
     }
     wtr.flush()?;
     Ok(())
-}
+}*/
 
 fn log_minor_lines(min: f64, max: f64, max_light_lines: usize) -> Vec<f64> {
     let mut result = Vec::new();
@@ -832,9 +989,20 @@ fn get_files_with_extension(dir_path: &str, extension: &str) -> Result<Vec<Strin
             && let Some(ext) = path.extension()
                 && ext == extension {
                     files.push(path);
-                }
+        }
+
     }
-    Ok(files.iter().map(|v| v.to_str().unwrap().to_owned()).collect())
+    let output = files.iter().map(|v|
+        match v.to_str() {
+            Some(v) => {v.to_owned()},
+            None => {
+                println!("| Error! | could not convert filename to text");
+                sleep(Duration::from_secs(5));
+                panic!();
+            },
+        }
+    ).collect();
+    Ok(output)
 }
 
 fn find_min_max(data: &[Vec<(f64, Option<f64>)>], limits: &[Limit]) -> Option<(f64, f64)> {
@@ -896,16 +1064,16 @@ mod tests {
 
     #[test]
     fn test_02() {
-        let raw = get_raw_data("C:\\ProgramData\\EMC32\\Customer Configuration\\SR_Conf_v5_1_beta\\Tests\\tt\\TL81000 (2024) AN L1 9 kHz");
+        let raw = get_raw_data("C:\\ProgramData\\EMC32\\Customer Configuration\\SR_Conf_v5_1_beta\\Tests\\tt\\TL81000 (2024) AN L1 9 kHz").unwrap();
         let (types, testy) = (raw.types, raw.values);
-        let testy2 = get_limits("C:\\ProgramData\\EMC32\\Customer Configuration\\SR_Conf_v5_1_beta\\Tests\\tt\\TL81000 (2024) AN L1 9 kHz");
+        let testy2 = get_limits("C:\\ProgramData\\EMC32\\Customer Configuration\\SR_Conf_v5_1_beta\\Tests\\tt\\TL81000 (2024) AN L1 9 kHz").unwrap();
         assert_eq!(find_min_max(&testy, &testy2).unwrap(), (3.3058554877, 127.0));
         assert_eq!(types, vec![("MHz".to_string(), "dBμV".to_string()), ("MHz".to_string(), "dBμV".to_string()), ("MHz".to_string(), "dBμV".to_string())])
     }
 
     #[test]
     fn test_03() {
-        let testy = get_limits("C:\\ProgramData\\EMC32\\Customer Configuration\\SR_Conf_v5_1_beta\\Tests\\tt\\TL81000 (2024) AN L1 9 kHz");
+        let testy = get_limits("C:\\ProgramData\\EMC32\\Customer Configuration\\SR_Conf_v5_1_beta\\Tests\\tt\\TL81000 (2024) AN L1 9 kHz").unwrap();
         assert_eq!(testy,
             vec![
                 Limit{
@@ -926,7 +1094,7 @@ mod tests {
 
     #[test]
     fn test_04() {
-        let testy = get_limits("C:\\ProgramData\\EMC32\\Customer Configuration\\SR_Conf_v5_1_beta\\Tests\\tt\\DUT1 MPP Rod Antenna 9k PKCAV");
+        let testy = get_limits("C:\\ProgramData\\EMC32\\Customer Configuration\\SR_Conf_v5_1_beta\\Tests\\tt\\DUT1 MPP Rod Antenna 9k PKCAV").unwrap();
         assert_eq!(testy,
             vec![
                 Limit{
@@ -950,8 +1118,8 @@ mod tests {
     fn test_05() {
         let mut checkee = vec![];
         let order = ["PK", "AV", "QP"];
-        let testy = get_raw_data("C:\\ProgramData\\EMC32\\Customer Configuration\\SR_Conf_v5_1_beta\\Tests\\tt\\DUT1 MPP Rod Antenna 9k PKCAV");
-        let testy2 = get_limits("C:\\ProgramData\\EMC32\\Customer Configuration\\SR_Conf_v5_1_beta\\Tests\\tt\\DUT1 MPP Rod Antenna 9k PKCAV");
+        let testy = get_raw_data("C:\\ProgramData\\EMC32\\Customer Configuration\\SR_Conf_v5_1_beta\\Tests\\tt\\DUT1 MPP Rod Antenna 9k PKCAV").unwrap();
+        let testy2 = get_limits("C:\\ProgramData\\EMC32\\Customer Configuration\\SR_Conf_v5_1_beta\\Tests\\tt\\DUT1 MPP Rod Antenna 9k PKCAV").unwrap();
         for (idx, emi) in testy.values.iter().enumerate() {
             for limit in testy2.iter() {
                 let lim = &limit.values;
