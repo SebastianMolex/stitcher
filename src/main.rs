@@ -41,11 +41,46 @@ struct Config { //config file data
     graph_output_dir_name: String,
     csvs_output_dir_name: String,
 
+    test_auto_name: String,
+    test_manual_name: String,
+    test_imm_identifier_name: String,
+    test_limit_folder: String,
+    test_limit_extension: String,
+
+    test_identifier_peak: String,
+    test_identifier_average: String,
+    test_identifier_quasipeak: String,
+    test_identifier_additional_baselevel: String,
+
+    test_oscilloscope_any_file: String,
+    test_oscilloscope_lin_identifier: String,
+    test_oscilloscope_log_identifier: String,
+    test_oscilloscope_prefix: String,
+    test_oscilloscope_middle: String,
+    test_oscilloscope_suffix: String,
+    test_oscilloscope_limit_lin: String,
+    test_oscilloscope_limit_log: String,
+
+    test_oscilloscope_graph_1_lin_name: String,
+    test_oscilloscope_graph_1_log_name: String,
+    test_oscilloscope_graph_2_lin_name: String,
+    test_oscilloscope_graph_2_log_name: String,
+    test_oscilloscope_graph_3_lin_name: String,
+    test_oscilloscope_graph_3_log_name: String,
+    test_oscilloscope_graph_4_lin_name: String,
+    test_oscilloscope_graph_4_log_name: String,
+
     dim_x: i32,
     dim_y: i32,
 
-    offset_y_top: f64,
-    offset_y_bot: f64,
+    offset_y_top_emi: f64,
+    offset_y_bot_emi: f64,
+    offset_y_rounding_emi: f64,
+
+    offset_y_bot_oscilloscope: f64,
+    offset_y_top_oscilloscope: f64,
+    offset_y_rounding_oscilloscope: f64,
+
 
     main_color: String,
     secondary_color: String,
@@ -128,7 +163,6 @@ fn main() {
         match create_new_ini() {
             Ok(_) => {
                 println!("| Message! | config generated");
-                sleep(Duration::from_secs(1));
             },
             Err(_) => {
                 println!("| Error! | could not generate config");
@@ -235,10 +269,45 @@ fn create_new_ini() -> Result<(), Box<dyn Error>>{
         test_dir: "../../../../Tests/".to_string(),
         graph_output_dir_name: "!raw_graph".to_string(),
         csvs_output_dir_name: "!csvs".to_string(),
+
+        test_auto_name: "Preview Result 1.Result".to_string(),
+        test_manual_name: "Result Table.Result".to_string(),
+        test_imm_identifier_name: "Result Table_EutFailures.Result".to_string(),
+        test_limit_folder: "System".to_string(),
+        test_limit_extension: "LimitLine".to_string(),
+
+        test_identifier_peak: "PK".to_string(),
+        test_identifier_average: "AV".to_string(),
+        test_identifier_quasipeak: "QP".to_string(),
+        test_identifier_additional_baselevel: "Baselevel".to_string(),
+
+        test_oscilloscope_any_file: "Graph_1_Lin.Wfm.csv".to_string(),
+        test_oscilloscope_lin_identifier: "Lin".to_string(),
+        test_oscilloscope_log_identifier: "Log".to_string(),
+        test_oscilloscope_prefix: "Graph_".to_string(),
+        test_oscilloscope_middle: "_".to_string(),
+        test_oscilloscope_suffix: "".to_string(),
+        test_oscilloscope_limit_lin: "Limit_Lin.csv".to_string(),
+        test_oscilloscope_limit_log: "Limit_Log.csv".to_string(),
+
+        test_oscilloscope_graph_1_lin_name: "L_Current_Lin".to_string(),
+        test_oscilloscope_graph_1_log_name: "L_Current_Log".to_string(),
+        test_oscilloscope_graph_2_lin_name: "CM_Current_Lin".to_string(),
+        test_oscilloscope_graph_2_log_name: "CM_Current_Log".to_string(),
+        test_oscilloscope_graph_3_lin_name: "DM_Voltage_Lin".to_string(),
+        test_oscilloscope_graph_3_log_name: "DM_Voltage_Log".to_string(),
+        test_oscilloscope_graph_4_lin_name: "CM_Voltage_Lin".to_string(),
+        test_oscilloscope_graph_4_log_name: "CM_Voltage_Log".to_string(),
+
         dim_x: 1920,
         dim_y: 1080,
-        offset_y_top: 20.0,
-        offset_y_bot: 20.0,
+        offset_y_top_emi: 20.0,
+        offset_y_bot_emi: 20.0,
+        offset_y_rounding_emi: 10.0,
+
+        offset_y_bot_oscilloscope: 1.0,
+        offset_y_top_oscilloscope: 1.0,
+        offset_y_rounding_oscilloscope: 1.0,
         main_color: "#FFFFFF".to_string(),
         secondary_color: "#000000".to_string(),
         graph_color_1: "#0000FF".to_string(),
@@ -315,6 +384,7 @@ fn read_volvo_oscilloscope_file(path: &str) -> Result<String, std::io::Error> {
 //probably takes decades if given a root folder of a drive.
 //this should only take the folder where tests are actually expected to be.
 fn search_for_all_test_paths(base_dir: &PathBuf, result: &mut Vec<Test>) -> Result<(), Box<dyn Error>> { //emissions tests are all such tests, that have a "Preview Result 1.Result" file.
+    let conf = CONFIG.get().ok_or("could not fetch config")?;
     if let Ok(dirs) = fs::read_dir(base_dir){
         for entry in dirs.flatten() {
             let path = entry.path();
@@ -324,10 +394,10 @@ fn search_for_all_test_paths(base_dir: &PathBuf, result: &mut Vec<Test>) -> Resu
                 if let Some(file_name) = path.file_name() {
                     //establish type of test
                     let typ = match file_name.to_string_lossy().as_ref() {
-                        "Preview Result 1.Result" | "Result Table.Result" => {
+                        v if v == conf.test_auto_name || v == conf.test_manual_name => {
                             //check if the immunity classic file exists:
                             let mut check_path = path.parent().ok_or("Could not establish folder of potential test")?.to_owned();
-                            check_path.push("Result Table_EutFailures.Result");
+                            check_path.push(&conf.test_imm_identifier_name);
                             match check_path.try_exists() {
                                 Ok(val) => {
                                     if val {
@@ -344,7 +414,7 @@ fn search_for_all_test_paths(base_dir: &PathBuf, result: &mut Vec<Test>) -> Resu
                             }
 
                         },
-                        "Graph_1_Lin.Wfm.csv" => {TestType::VolvoOscilloscope},
+                        v if v == conf.test_oscilloscope_any_file => {TestType::VolvoOscilloscope},
                         _ => {continue;},
                     };
 
@@ -364,13 +434,14 @@ fn search_for_all_test_paths(base_dir: &PathBuf, result: &mut Vec<Test>) -> Resu
 }
 
 fn get_raw_data_emi(file_path: &str) -> Result<RawData, Box<dyn Error>> { //(Vec<(Freq Unit: String, Level Unit: String)>, Vec<Vec<(Freq: f64, Level: f64)>>)
+    let conf = CONFIG.get().ok_or("could not fetch config")?;
     let mut output_values = vec![];
     let mut output_types = vec![];
     //if preview results exists, it was an auto-test, else it is a manual test.
-    let text = if Path::new(&(file_path.to_string() + "/Preview Result 1.Result")).exists() {
-        read_utf16le_file(&(file_path.to_string() + "/Preview Result 1.Result"))?
+    let text = if Path::new(&(file_path.to_string() + "/" + &conf.test_auto_name)).exists() {
+        read_utf16le_file(&(file_path.to_string() + "/" + &conf.test_auto_name))?
     } else {
-        read_utf16le_file(&(file_path.to_string() + "/Result Table.Result"))?
+        read_utf16le_file(&(file_path.to_string() + "/" + &conf.test_manual_name))?
     };
 
     let mut is_detector = vec![];
@@ -449,13 +520,14 @@ fn get_raw_data_emi(file_path: &str) -> Result<RawData, Box<dyn Error>> { //(Vec
 
 fn get_raw_data_imm(file_path: &str) -> Result<RawData, Box<dyn Error>> { //(Vec<(Freq Unit: String, Level Unit: String)>, Vec<Vec<(Freq: f64, Level: f64)>>)
     todo!();
+    let conf = CONFIG.get().ok_or("could not fetch config")?;
     let mut output_values = vec![];
     let mut output_types = vec![];
     //if preview results exists, it was an auto-test, else it is a manual test.
-    let text = if Path::new(&(file_path.to_string() + "/Preview Result 1.Result")).exists() {
-        read_utf16le_file(&(file_path.to_string() + "/Preview Result 1.Result"))?
+    let text = if Path::new(&(file_path.to_string() + "/" + &conf.test_auto_name)).exists() {
+        read_utf16le_file(&(file_path.to_string() + "/" + &conf.test_auto_name))?
     } else {
-        read_utf16le_file(&(file_path.to_string() + "/Result Table.Result"))?
+        read_utf16le_file(&(file_path.to_string() + "/" + &conf.test_manual_name))?
     };
 
     let mut is_detector = vec![];
@@ -533,15 +605,16 @@ fn get_raw_data_imm(file_path: &str) -> Result<RawData, Box<dyn Error>> { //(Vec
 }
 
 fn get_raw_data_volvo_oscilloscope(file_path: &str) -> Result<RawData, Box<dyn Error>> { //(Vec<(Freq Unit: String, Level Unit: String)>, Vec<Vec<(Freq: f64, Level: f64)>>)
+    let conf = CONFIG.get().ok_or("could not fetch config")?;
     let mut output_values = vec![];
     let mut output_types = vec![];
     //if preview results exists, it was an auto-test, else it is a manual test or an immunity one.
-    let divs = ["Lin", "Log"];
+    let divs = [&conf.test_oscilloscope_lin_identifier, &conf.test_oscilloscope_log_identifier];
 
     for (did, div) in divs.into_iter().enumerate() {
         for column_id in 1..=4 {
-            let header = read_volvo_oscilloscope_file(&(file_path.to_string() + "/Graph_" + &column_id.to_string() + "_" + div + ".csv"))?;
-            let text = read_volvo_oscilloscope_file(&(file_path.to_string() + "/Graph_" + &column_id.to_string() + "_" + div + ".Wfm.csv"))?;
+            let header = read_volvo_oscilloscope_file(&(file_path.to_string() + "/" + &conf.test_oscilloscope_prefix + &column_id.to_string() + &conf.test_oscilloscope_middle + div + &conf.test_oscilloscope_suffix + ".csv"))?;
+            let text = read_volvo_oscilloscope_file(&(file_path.to_string() + "/" + &conf.test_oscilloscope_prefix + &column_id.to_string() + &conf.test_oscilloscope_middle + div + &conf.test_oscilloscope_suffix + ".Wfm.csv"))?;
 
             //get units from the header
             let y_unit = if let Some(start) = header.find("BaseUnit:") {
@@ -549,17 +622,20 @@ fn get_raw_data_volvo_oscilloscope(file_path: &str) -> Result<RawData, Box<dyn E
                 if let Some(end) = sub_string.find(":") {
                     sub_string[..end].to_string()
                 } else {
-                    println!("| Error! | Header file does not match format: {}", file_path.to_string() + "/Graph_" + &column_id.to_string() + ".csv");
+                    println!("| Error! | Header file does not match format: {}", file_path.to_string() + "/" + &conf.test_oscilloscope_prefix + &column_id.to_string() + &conf.test_oscilloscope_middle + div + &conf.test_oscilloscope_suffix + ".csv");
                     sleep(Duration::from_secs(5));
                     panic!();
                 }
             } else {
-                println!("| Error! | Header file does not match format: {}", file_path.to_string() + "/Graph_" + &column_id.to_string() + ".csv");
+                println!("| Error! | Header file does not match format: {}", file_path.to_string() + "/" + &conf.test_oscilloscope_prefix + &column_id.to_string() + &conf.test_oscilloscope_middle + div + &conf.test_oscilloscope_suffix + ".csv");
                 sleep(Duration::from_secs(5));
                 panic!();
             };
-
-            output_types.push(("Hz".to_string(), y_unit));
+            if did == 0 {
+                output_types.push(("s".to_string(), y_unit)); //too hard linked to value to extract string to config easily
+            } else {
+                output_types.push(("Hz".to_string(), y_unit)); //too hard linked to value to extract string to config easily
+            }
 
             //now read the actual data
 
@@ -590,9 +666,10 @@ fn get_raw_data_volvo_oscilloscope(file_path: &str) -> Result<RawData, Box<dyn E
 }
 
 fn get_limits_emi(file_path: &str) -> Result<Vec<Limit>, Box<dyn Error>> {
+    let conf = CONFIG.get().ok_or("could not fetch config")?;
     let mut output: Vec<Limit> = vec![];
 
-    let file_paths: Vec<String> = get_files_with_extension(&(file_path.to_string() + "/System"), "LimitLine")?;
+    let file_paths: Vec<String> = get_files_with_extension(&(file_path.to_string() + "/" + &conf.test_limit_folder), &conf.test_limit_extension)?;
 
     for (j, file_path) in file_paths.into_iter().enumerate() {
         let text = read_utf16le_file(&file_path)?;
@@ -634,10 +711,11 @@ fn get_limits_emi(file_path: &str) -> Result<Vec<Limit>, Box<dyn Error>> {
 }
 
 fn get_limits_imm(file_path: &str) -> Result<Vec<Limit>, Box<dyn Error>> {
+    let conf = CONFIG.get().ok_or("could not fetch config")?;
     todo!();
     let mut output: Vec<Limit> = vec![];
 
-    let file_paths: Vec<String> = get_files_with_extension(&(file_path.to_string() + "/System"), "LimitLine")?;
+    let file_paths: Vec<String> = get_files_with_extension(&(file_path.to_string() + "/" + &conf.test_limit_folder), &conf.test_limit_extension)?;
 
     for (j, file_path) in file_paths.into_iter().enumerate() {
         let text = read_utf16le_file(&file_path)?;
@@ -679,16 +757,18 @@ fn get_limits_imm(file_path: &str) -> Result<Vec<Limit>, Box<dyn Error>> {
 }
 
 fn get_limits_volvo_oscilloscope(file_path: &str) -> Result<Vec<Limit>, Box<dyn Error>> {
+    let conf = CONFIG.get().ok_or("could not fetch config")?;
     let mut output: Vec<Limit> = vec![];
 
-    let file_path_lin: String = file_path.to_string() + "/Limit_Lin.csv";
-    let file_path_log: String = file_path.to_string() + "/Limit_Log.csv";
+    let file_path_lin: String = file_path.to_string() + "/" + &conf.test_oscilloscope_limit_lin;
+    let file_path_log: String = file_path.to_string() + "/" + &conf.test_oscilloscope_limit_log;
 
     let text_lin = read_volvo_oscilloscope_file(&file_path_lin)?;
     let text_log = read_volvo_oscilloscope_file(&file_path_log)?;
 
-    output.push(Limit { name: "Lin".to_string(), values: vec![] });
-    output.push(Limit { name: "Log".to_string(), values: vec![] });
+
+    output.push(Limit { name: conf.test_oscilloscope_graph_1_lin_name.clone(), values: vec![] });
+    output.push(Limit { name: conf.test_oscilloscope_graph_1_log_name.clone(), values: vec![] });
 
 
     for line_lin in text_lin.lines() {
@@ -810,14 +890,14 @@ fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
 
     for lim in &limits {
         match &lim.name {
-            name if name.contains("PK") => {
-                order.push("PK")
+            name if name.contains(&conf.test_identifier_peak) => {
+                order.push(&conf.test_identifier_peak)
             },
-            name if name.contains("AV") => {
-                order.push("AV")
+            name if name.contains(&conf.test_identifier_average) => {
+                order.push(&conf.test_identifier_average)
             },
-            name if name.contains("QP") => {
-                order.push("QP")
+            name if name.contains(&conf.test_identifier_quasipeak) => {
+                order.push(&conf.test_identifier_quasipeak)
             },
             _ => {},
         }
@@ -825,9 +905,9 @@ fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
 
     order.sort_by_key(|&elem| {
         match elem {
-            "PK" => 0,
-            "AV" => 1,
-            "QP" => 2,
+            v if *v == conf.test_identifier_peak => 0,
+            v if *v == conf.test_identifier_average => 1,
+            v if *v == conf.test_identifier_quasipeak => 2,
             _ => u8::MAX,
         }
     });
@@ -839,7 +919,12 @@ fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
     let colors_limit = [hex_to_rgb(&conf.limit_color_baselevel)?, hex_to_rgb(&conf.limit_color_pk)?, hex_to_rgb(&conf.limit_color_av)?, hex_to_rgb(&conf.limit_color_qp)?];
 
     //build color order based on naming of limits:
-    let color_list_limits: Vec<RGBColor> = build_color_list(&colors_limit, &limits, &["Baselevel", "PK", "AV", "QP"]);
+    let color_list_limits: Vec<RGBColor> = build_color_list(&colors_limit, &limits, &[
+        &conf.test_identifier_additional_baselevel,
+        &conf.test_identifier_peak,
+        &conf.test_identifier_average,
+        &conf.test_identifier_quasipeak
+        ]);
 
     if raw_data.len() > colors_plot.len() + 1 {panic!()};
 
@@ -850,8 +935,8 @@ fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
 
     let (mut y_min, mut y_max) = find_min_max(&raw_data, &limits).ok_or("could not find minimum and maximum of data")?;
 
-    y_min = ((y_min - conf.offset_y_bot)/10.0).round() * 10.0;
-    y_max = ((y_max + conf.offset_y_top)/10.0).round() * 10.0;
+    y_min = ((y_min - conf.offset_y_bot_emi)/conf.offset_y_rounding_emi).round() * conf.offset_y_rounding_emi;
+    y_max = ((y_max + conf.offset_y_top_emi)/conf.offset_y_rounding_emi).round() * conf.offset_y_rounding_emi;
 
     let bg_color = hex_to_rgb(&conf.main_color)?;
     let secondary_color = hex_to_rgb(&conf.secondary_color)?;
@@ -1178,8 +1263,8 @@ fn plotter_volvo_oscilloscope(file_path: &Path) -> Result<(), Box<dyn Error>> {
     //plot pre-setup
 
     let order = [
-        "L_Current_Lin", "CM_Current_Lin", "DM_Voltage_Lin", "CM_Voltage_Lin",
-        "L_Current_Log", "CM_Current_Log", "DM_Voltage_Log", "CM_Voltage_Log"
+        &conf.test_oscilloscope_graph_1_lin_name, &conf.test_oscilloscope_graph_2_lin_name, &conf.test_oscilloscope_graph_3_lin_name, &conf.test_oscilloscope_graph_4_lin_name,
+        &conf.test_oscilloscope_graph_1_log_name, &conf.test_oscilloscope_graph_2_log_name, &conf.test_oscilloscope_graph_3_log_name, &conf.test_oscilloscope_graph_4_log_name
     ];
     let colors_plot = [
         hex_to_rgb(&conf.graph_color_1)?, hex_to_rgb(&conf.graph_color_1)?, hex_to_rgb(&conf.graph_color_2)?, hex_to_rgb(&conf.graph_color_2)?,
@@ -1201,8 +1286,8 @@ fn plotter_volvo_oscilloscope(file_path: &Path) -> Result<(), Box<dyn Error>> {
 
     let (mut y_min, mut y_max) = find_min_max(&raw_data, &limits).ok_or("could not find minimum and maximum of data")?;
 
-    y_min = (y_min - 1.0).round();
-    y_max = (y_max + 1.0).round();
+    y_min = ((y_min - conf.offset_y_bot_oscilloscope)/conf.offset_y_rounding_oscilloscope).round() * conf.offset_y_rounding_oscilloscope;
+    y_max = ((y_max + conf.offset_y_top_oscilloscope)/conf.offset_y_rounding_oscilloscope).round() * conf.offset_y_rounding_oscilloscope;
 
     let bg_color = hex_to_rgb(&conf.main_color)?;
     let secondary_color = hex_to_rgb(&conf.secondary_color)?;
@@ -1241,7 +1326,7 @@ fn plotter_volvo_oscilloscope(file_path: &Path) -> Result<(), Box<dyn Error>> {
             .build_cartesian_2d((f_min .. f_max).log_scale(), y_min..y_max)?;
 
         chart.configure_mesh()
-        .x_desc(format!("Frequency / {}", types[idx].0))
+        .x_desc(format!("{} / {}", (if order[idx].contains(&conf.test_oscilloscope_lin_identifier) {"Time"} else {"Frequency"}), types[idx].0))
         .y_desc(format!("Value / {}", types[idx].1))
         .axis_desc_style(font_style.clone().with_color(secondary_color))
         .bold_line_style(secondary_color.mix(conf.mesh_alpha).stroke_width(conf.mesh_thickness))
@@ -1357,7 +1442,7 @@ fn plotter_volvo_oscilloscope(file_path: &Path) -> Result<(), Box<dyn Error>> {
 
         let mut peaks: Vec<Peak> = vec![];
 
-        for (lid, lim) in limits.iter().enumerate() { //for each limit
+        for lim in &limits { //for each limit
             let limit_name = &lim.name;
             let limit = &lim.values;
             if order[idx].contains(limit_name) { //reversed from emi method
