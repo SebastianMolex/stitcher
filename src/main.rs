@@ -9,7 +9,8 @@ use std::{
     },
     io::{
         Read,
-        Write
+        Write,
+        stdin
     },
     path::{
         self,
@@ -17,6 +18,12 @@ use std::{
         Path
     },
     sync::OnceLock
+};
+
+//security:
+use argon2::{
+    password_hash::{phc::PasswordHash, PasswordVerifier},
+    Argon2,
 };
 
 use csv::WriterBuilder; //.csv creation
@@ -34,6 +41,9 @@ use serde::{Serialize, Deserialize};
 
 
 static CONFIG: OnceLock<Config> = OnceLock::new(); //to store config file
+//safety related:
+const PASS_ACTUAL_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$fIpUMMpCyhLhWblxaIhtpg$hcrlizZD/QtXfWJcmrQ9TLmWzyQgWSkHwVzkgUELQQw";
+static PASS_USER_ATTEMPT: OnceLock<String> = OnceLock::new();
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Config { //config file data
@@ -126,6 +136,7 @@ struct Config { //config file data
 
 #[derive(Debug, PartialEq)]
 struct RawData {
+    classifiers: Vec<String>,
     types: Vec<(String, String)>,
     values: Vec<Vec<(f64, Option<f64>)>>,
 }
@@ -144,20 +155,46 @@ struct Peak {
     limit_level: f64,
 }
 
+#[derive(PartialEq)]
 enum TestType {
     Emi,
     Imm,
     VolvoOscilloscope,
 }
 
+#[derive(PartialEq)]
 struct Test {
     typ: TestType,
     path: PathBuf,
 }
 
+fn verify_password(password: &str, stored_hash: &str) -> bool {
+    let parsed_hash = match PasswordHash::new(stored_hash) {
+        Ok(h) => h,
+        Err(_) => return false,
+    };
+    Argon2::default()
+        .verify_password(password.as_bytes(), &parsed_hash)
+        .is_ok()
+}
 
+#[inline(always)]
+fn drm() {
+    let attempt = PASS_USER_ATTEMPT.get();
+    if let Some(v) = attempt && !verify_password(v.trim(), PASS_ACTUAL_HASH) {
+        println!("| Error! | Password is incorrect");
+        sleep(Duration::from_secs(5));
+        panic!();
+    }
+}
 
 fn main() {
+    println!("| Warning! | This Copy is Password Protected");
+    println!("| Message! | Please enter the password:");
+    let mut attempt = String::new();
+    stdin().read_line(&mut attempt).expect("Failed to read input");
+    PASS_USER_ATTEMPT.get_or_init(|| {attempt});
+    drm();
     if !Path::new("config.ini").exists() {//if config doesnt exist, create it
         println!("| Warning! | no config found, generating new config");
         match create_new_ini() {
@@ -173,6 +210,7 @@ fn main() {
     }
     println!("| Message! | loading config...");
     get_config(); //loads config to global static
+    drm();
     let conf = match CONFIG.get() {
         Some(v) => {v},
         None => {
@@ -193,6 +231,7 @@ fn main() {
             return;
         },
     };
+    drm();
     match search_for_all_test_paths(&path, &mut tests_to_plot) { //finds all types of tests
         Ok(_) => {println!("| Message! | all plots scanned, begin plotting...");},
         Err(_) => {
@@ -312,7 +351,7 @@ fn create_new_ini() -> Result<(), Box<dyn Error>>{
         secondary_color: "#000000".to_string(),
         graph_color_1: "#0000FF".to_string(),
         graph_color_2: "#000000".to_string(),
-        graph_color_3: "#FF00FF".to_string(),
+        graph_color_3: "#0000FF".to_string(),
         graph_color_4: "#00FF00".to_string(),
         limit_color_pk: "#00FF00".to_string(),
         limit_color_av: "#FF0000".to_string(),
@@ -418,13 +457,15 @@ fn search_for_all_test_paths(base_dir: &PathBuf, result: &mut Vec<Test>) -> Resu
                         _ => {continue;},
                     };
 
-                    //found the file, add dir as a test.
-                    result.push(
-                        Test {
-                            typ,
-                            path: path.parent().ok_or(format!("could not search given test path: {}", path.to_string_lossy()))?.to_path_buf(),
-                        }
-                    );
+                    //found the file, add dir as a test if it does not already exist.
+                    let test = Test {
+                        typ,
+                        path: path.parent().ok_or(format!("could not search given test path: {}", path.to_string_lossy()))?.to_path_buf(),
+                    };
+
+                    if !result.contains(&test){
+                        result.push(test);
+                    }
 
                 } //given error occurs only if some clown places a result in a drive root and sets that as the Tests directory in the config.
             }     //actually even then it shouldn't trigger as the .parent() should resolve to the drive's root, no?
@@ -437,6 +478,7 @@ fn get_raw_data_emi(file_path: &str) -> Result<RawData, Box<dyn Error>> { //(Vec
     let conf = CONFIG.get().ok_or("could not fetch config")?;
     let mut output_values = vec![];
     let mut output_types = vec![];
+    let mut output_classifiers = vec![];
     //if preview results exists, it was an auto-test, else it is a manual test.
     let text = if Path::new(&(file_path.to_string() + "/" + &conf.test_auto_name)).exists() {
         read_utf16le_file(&(file_path.to_string() + "/" + &conf.test_auto_name))?
@@ -447,6 +489,7 @@ fn get_raw_data_emi(file_path: &str) -> Result<RawData, Box<dyn Error>> { //(Vec
     let mut is_detector = vec![];
     let mut prefix_done = false;
     let mut unit_line = "".to_string(); //since the defining typeline that tells the meaning of this lines comes after if, it has to be stored until that line is encountered
+    let mut classifier_line = "".to_string(); //since the defining typeline that tells the meaning of this lines comes after if, it has to be stored until that line is encountered
 
     for (row_id, line) in text.lines().enumerate() {
         if line == "[TableValues]" { //table begins, set flag so the next checks are skipped to save cycles.
@@ -455,10 +498,13 @@ fn get_raw_data_emi(file_path: &str) -> Result<RawData, Box<dyn Error>> { //(Vec
         } else if !prefix_done {
             if line.contains("Unit=") {//remember this line until the type_line is encountered
                 unit_line = line.to_string();
+            } else if line.contains("Name="){
+                classifier_line = line.to_string();
             } else if line.contains("ColTyp=") {
-                //line that explains unit_lines meaning encountered, generate output_types now.
+                //line that explains unit_lines & classifier_lines meaning encountered, generate output_types now.
                 let types_line_parts: Vec<&str> = line.split(['\t', ' ']).collect();
                 let mut units_line_parts = unit_line.split(['\t', ' ']).skip(1);
+                let mut classifier_line_parts = classifier_line.split(['\t', ' ']).skip(2);
                 let mut freq_unit = "".to_string();
 
                 for part in types_line_parts {
@@ -467,7 +513,8 @@ fn get_raw_data_emi(file_path: &str) -> Result<RawData, Box<dyn Error>> { //(Vec
                             freq_unit = units_line_parts.next().ok_or("could not fetch frequency unit")?.to_string();
                         },
                         "Level" => {
-                            output_types.push((freq_unit.clone(), units_line_parts.next().ok_or("could not fetch level unit")?.to_string()))
+                            output_types.push((freq_unit.clone(), units_line_parts.next().ok_or("could not fetch level unit")?.to_string()));
+                            output_classifiers.push(classifier_line_parts.next().ok_or("could not fetch classifier")?.to_string());
                         },
                         _ => {},
                     }
@@ -515,7 +562,7 @@ fn get_raw_data_emi(file_path: &str) -> Result<RawData, Box<dyn Error>> { //(Vec
             );
         }
     }
-    Ok(RawData { types: output_types, values: output_values })
+    Ok(RawData { classifiers: output_classifiers, types: output_types, values: output_values })
 }
 
 fn get_raw_data_imm(file_path: &str) -> Result<RawData, Box<dyn Error>> { //(Vec<(Freq Unit: String, Level Unit: String)>, Vec<Vec<(Freq: f64, Level: f64)>>)
@@ -523,6 +570,7 @@ fn get_raw_data_imm(file_path: &str) -> Result<RawData, Box<dyn Error>> { //(Vec
     let conf = CONFIG.get().ok_or("could not fetch config")?;
     let mut output_values = vec![];
     let mut output_types = vec![];
+    let mut output_classifiers = vec![];
     //if preview results exists, it was an auto-test, else it is a manual test.
     let text = if Path::new(&(file_path.to_string() + "/" + &conf.test_auto_name)).exists() {
         read_utf16le_file(&(file_path.to_string() + "/" + &conf.test_auto_name))?
@@ -533,6 +581,7 @@ fn get_raw_data_imm(file_path: &str) -> Result<RawData, Box<dyn Error>> { //(Vec
     let mut is_detector = vec![];
     let mut prefix_done = false;
     let mut unit_line = "".to_string(); //since the defining typeline that tells the meaning of this lines comes after if, it has to be stored until that line is encountered
+    let mut classifier_line = "".to_string(); //since the defining typeline that tells the meaning of this lines comes after if, it has to be stored until that line is encountered
 
     for (row_id, line) in text.lines().enumerate() {
         if line == "[TableValues]" { //table begins, set flag so the next checks are skipped to save cycles.
@@ -541,10 +590,13 @@ fn get_raw_data_imm(file_path: &str) -> Result<RawData, Box<dyn Error>> { //(Vec
         } else if !prefix_done {
             if line.contains("Unit=") {//remember this line until the type_line is encountered
                 unit_line = line.to_string();
+            } else if line.contains("Name="){
+                classifier_line = line.to_string();
             } else if line.contains("ColTyp=") {
-                //line that explains unit_lines meaning encountered, generate output_types now.
+                //line that explains unit_lines & classifier_lines meaning encountered, generate output_types now.
                 let types_line_parts: Vec<&str> = line.split(['\t', ' ']).collect();
                 let mut units_line_parts = unit_line.split(['\t', ' ']).skip(1);
+                let mut classifier_line_parts = classifier_line.split(['\t', ' ']).skip(1);
                 let mut freq_unit = "".to_string();
 
                 for part in types_line_parts {
@@ -553,7 +605,8 @@ fn get_raw_data_imm(file_path: &str) -> Result<RawData, Box<dyn Error>> { //(Vec
                             freq_unit = units_line_parts.next().ok_or("could not fetch frequency unit")?.to_string();
                         },
                         "Level" => {
-                            output_types.push((freq_unit.clone(), units_line_parts.next().ok_or("could not fetch level unit")?.to_string()))
+                            output_types.push((freq_unit.clone(), units_line_parts.next().ok_or("could not fetch level unit")?.to_string()));
+                            output_classifiers.push(classifier_line_parts.next().ok_or("could not fetch classifier")?.to_string());
                         },
                         _ => {},
                     }
@@ -601,7 +654,7 @@ fn get_raw_data_imm(file_path: &str) -> Result<RawData, Box<dyn Error>> { //(Vec
             );
         }
     }
-    Ok(RawData { types: output_types, values: output_values })
+    Ok(RawData { classifiers: output_classifiers, types: output_types, values: output_values })
 }
 
 fn get_raw_data_volvo_oscilloscope(file_path: &str) -> Result<RawData, Box<dyn Error>> { //(Vec<(Freq Unit: String, Level Unit: String)>, Vec<Vec<(Freq: f64, Level: f64)>>)
@@ -610,6 +663,10 @@ fn get_raw_data_volvo_oscilloscope(file_path: &str) -> Result<RawData, Box<dyn E
     let mut output_types = vec![];
     //if preview results exists, it was an auto-test, else it is a manual test or an immunity one.
     let divs = [&conf.test_oscilloscope_lin_identifier, &conf.test_oscilloscope_log_identifier];
+    let output_classifiers = vec![
+        "Lin".to_string(), "Lin".to_string(), "Lin".to_string(), "Lin".to_string(),
+        "Log".to_string(), "Log".to_string(), "Log".to_string(), "Log".to_string()
+    ];
 
     for (did, div) in divs.into_iter().enumerate() {
         for column_id in 1..=4 {
@@ -661,8 +718,7 @@ fn get_raw_data_volvo_oscilloscope(file_path: &str) -> Result<RawData, Box<dyn E
             }
         }
     }
-
-    Ok(RawData { types: output_types, values: output_values })
+    Ok(RawData { classifiers: output_classifiers, types: output_types, values: output_values })
 }
 
 fn get_limits_emi(file_path: &str) -> Result<Vec<Limit>, Box<dyn Error>> {
@@ -848,22 +904,40 @@ fn peak_search_log_linear(data: &[(f64, Option<f64>)], limit: &Limit, limit_star
         }) //returns none if no value ever breaks the limit
 }
 
-fn build_color_list(colors: &[RGBColor], limits: &[Limit], order: &[&str]) -> Vec<RGBColor> {
-    let mut output = vec![];
-    for limit in limits {
-        for (idx, comp) in order.iter().enumerate() {
-            if limit.name.contains(comp) {
-                output.push(colors[idx]);
-                break;
-            }
+fn build_color_lists(order: &[&str]) -> Result<(Vec<RGBColor>, Vec<RGBColor>), Box<dyn Error>> {
+    println!("{:?}", order);
+    let conf = CONFIG.get().ok_or("could not fetch config")?;
+    let mut output1 = vec![];
+    let mut output2 = vec![];
+
+    for &item in order {
+        match item {
+            v if *v == conf.test_identifier_additional_baselevel => {
+                output1.push(hex_to_rgb(&conf.graph_color_4)?);
+                output2.push(hex_to_rgb(&conf.limit_color_baselevel)?);
+            },
+            v if *v == conf.test_identifier_quasipeak => {
+                output1.push(hex_to_rgb(&conf.graph_color_3)?);
+                output2.push(hex_to_rgb(&conf.limit_color_qp)?);
+            },
+            v if *v == conf.test_identifier_average => {
+                output1.push(hex_to_rgb(&conf.graph_color_2)?);
+                output2.push(hex_to_rgb(&conf.limit_color_av)?);
+            },
+            v if *v == conf.test_identifier_peak => {
+                output1.push(hex_to_rgb(&conf.graph_color_1)?);
+                output2.push(hex_to_rgb(&conf.limit_color_pk)?);
+            },
+            _ => {panic!("Found item that matches no pattern")},
         }
     }
 
-    output
+
+    Ok((output1, output2))
 }
 
 fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
-
+    drm();
     let file_path = file_path.to_string_lossy();
     let file_path = &file_path.as_ref();
 
@@ -876,7 +950,7 @@ fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
     let testname = Path::new(file_path).file_name().and_then(|name| name.to_str()).ok_or("could not convert filepath to text")?;
 
     let raw = get_raw_data_emi(file_path)?;
-    let (types, raw_data) = (raw.types, raw.values);
+    let (classes, types, raw_data) = (raw.classifiers, raw.types, raw.values);
     let limits: Vec<Limit> = get_limits_emi(file_path)?;
 
     if raw_data.is_empty() { //if true most likely case: Preview Result 1.Result is in binary format, so quit
@@ -888,16 +962,16 @@ fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
 
     let mut order = vec![];
 
-    for lim in &limits {
-        match &lim.name {
+    for class in &classes {
+        match class {
+            name if name.contains(&conf.test_identifier_quasipeak) => {
+                order.push(conf.test_identifier_quasipeak.as_ref())
+            },
             name if name.contains(&conf.test_identifier_peak) => {
-                order.push(&conf.test_identifier_peak)
+                order.push(conf.test_identifier_peak.as_ref())
             },
             name if name.contains(&conf.test_identifier_average) => {
-                order.push(&conf.test_identifier_average)
-            },
-            name if name.contains(&conf.test_identifier_quasipeak) => {
-                order.push(&conf.test_identifier_quasipeak)
+                order.push(conf.test_identifier_average.as_ref())
             },
             _ => {},
         }
@@ -913,20 +987,10 @@ fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
     });
 
 
-    //plot pre-setup
+    //build color order:
+    let (color_list_plots, color_list_limits) = build_color_lists(&order)?;
 
-    let colors_plot = [hex_to_rgb(&conf.graph_color_1)?, hex_to_rgb(&conf.graph_color_2)?, hex_to_rgb(&conf.graph_color_3)?, hex_to_rgb(&conf.graph_color_4)?];
-    let colors_limit = [hex_to_rgb(&conf.limit_color_baselevel)?, hex_to_rgb(&conf.limit_color_pk)?, hex_to_rgb(&conf.limit_color_av)?, hex_to_rgb(&conf.limit_color_qp)?];
-
-    //build color order based on naming of limits:
-    let color_list_limits: Vec<RGBColor> = build_color_list(&colors_limit, &limits, &[
-        &conf.test_identifier_additional_baselevel,
-        &conf.test_identifier_peak,
-        &conf.test_identifier_average,
-        &conf.test_identifier_quasipeak
-        ]);
-
-    if raw_data.len() > colors_plot.len() + 1 {panic!()};
+    if raw_data.len() > color_list_plots.len() + 1 {panic!()};
 
     let freqs_plot: Vec<f64> = raw_data[0].iter().map(|(first, _)| first.to_owned()).collect();
 
@@ -946,8 +1010,8 @@ fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
     if conf.graph_output_dir_name.is_empty(){panic!()};
     if conf.csvs_output_dir_name.is_empty(){panic!()};
 
-    fs::create_dir_all(file_path.to_string() + "/" + &conf.graph_output_dir_name)?;
-    fs::create_dir_all(file_path.to_string() + "/" + &conf.csvs_output_dir_name)?;
+    //fs::create_dir_all(file_path.to_string() + "/" + &conf.graph_output_dir_name)?;
+    //fs::create_dir_all(file_path.to_string() + "/" + &conf.csvs_output_dir_name)?;
 
     //for each trace make a graphic:
 
@@ -981,14 +1045,16 @@ fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
         .bold_line_style(secondary_color.mix(conf.mesh_alpha).stroke_width(conf.mesh_thickness))
         .light_line_style(secondary_color.mix(conf.mesh_alpha).stroke_width(conf.mesh_thickness))
         .disable_x_mesh() //only way to not render minor tickmark lines... sadly also disables major lines... gotta do em manually then...
+        .disable_y_mesh()
         .y_max_light_lines(0)
         .x_max_light_lines(0)
         .label_style(TextStyle::from(font_style.clone()).with_color(secondary_color))
+        .x_labels(5)
         .draw()?;
 
         //add crosses
         /*chart.draw_series(emi.iter().map(|&(x, y)| {
-            EmptyElement::at((x, y)) + Cross::new((0, 0), 5, colors_plot[idx])
+            EmptyElement::at((x, y)) + Cross::new((0, 0), 5, color_list_plots[idx])
         }))?;*/
 
         //add lined major gridlines:
@@ -1020,6 +1086,28 @@ fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
             )?;
         }
 
+        //same for y-axis:
+
+        let mut y = y_min;
+        while y < y_max {
+            y += 10.0;
+            if y.abs() % 20.0 > 0.3 {
+                chart.draw_series(DottedLineSeries::new(
+                    vec![(f_min, y), (f_max, y)],
+                    0,
+                    10,
+                    move |c| Circle::new(c, 1, secondary_color.mix(conf.mesh_alpha).filled()),
+                ))?;
+            } else {
+                chart.draw_series(
+                    LineSeries::new(
+                        vec![(f_min, y), (f_max, y)],
+                        secondary_color.mix(conf.mesh_alpha)
+                    )
+                )?;
+            }
+        }
+
         //and now the labels:
 
         let plotting_area = chart.plotting_area();
@@ -1031,7 +1119,7 @@ fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
 
         //bottom left extra-tickmark
 
-        if !is_power_of_ten(f_min) {
+        if !is_power_of_ten(f_min) || (f_min - 0.1 < 0.0001 && f_max - 0.2 < 0.0001) {
             root.draw(&PathElement::new(
                 vec![(px_left, py_bottom), (px_left, py_bottom + tick_len)],
                 secondary_color,
@@ -1052,19 +1140,6 @@ fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
         }
 
 
-        let mut y = y_min;
-        while y < y_max {
-            y += 10.0;
-            if y % 20.0 > 0.3 {
-                chart.draw_series(DottedLineSeries::new(
-                    vec![(f_min, y), (f_max, y)],
-                    0,
-                    10,
-                    move |c| Circle::new(c, 1, secondary_color.mix(conf.mesh_alpha).filled()),
-                ))?;
-            }
-        }
-
         //chart actual data the cloning of the data could be avoided if the peak_search was adjusted to run once at the beginning
         //that would double the looping over limits. Its speed vs space and this configuration focuses more on speed.
         let mut emi_split: Vec<Vec<(f64, f64)>> = Vec::new();
@@ -1082,17 +1157,17 @@ fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
         }
         let mut temp = None;
         for emi_graph in emi_split {
-            temp = Some(chart.draw_series(LineSeries::new(emi_graph.clone(), &colors_plot[idx]))?);
+            temp = Some(chart.draw_series(LineSeries::new(emi_graph.clone(), &color_list_plots[idx]))?);
         }
         if let Some(val) = temp {
-            val.label(order[idx].to_string() + " Measurement Results").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], colors_plot[idx].stroke_width(conf.legend_line_thickness)));
+            val.label(order[idx].to_string() + " Measurement Results").legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color_list_plots[idx].stroke_width(conf.legend_line_thickness)));
         }
 
 
 
         let mut peaks: Vec<Peak> = vec![];
 
-        for (lid, lim) in limits.iter().enumerate() { //for each limit
+        for lim in limits.iter() { //for each limit
             let limit_name = &lim.name;
             let limit = &lim.values;
             if limit_name.contains(order[idx]) { //check if the limit_name should be plotted
@@ -1108,10 +1183,10 @@ fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
                     }
 
                     //plot each limit chunk(breaks if the limit pair format start<->finish is broken):
-                    let temp = chart.draw_series(LineSeries::new(vec![limit[2*i], limit[2*i+1]], color_list_limits[lid].stroke_width(3)))?;
+                    let temp = chart.draw_series(LineSeries::new(vec![limit[2*i], limit[2*i+1]], color_list_limits[idx].stroke_width(3)))?;
                     if i == 0 {
                         //and add it to the legend once
-                        let color_clone = color_list_limits[lid];
+                        let color_clone = color_list_limits[idx];
                         temp.label(limit_name).legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color_clone.stroke_width(3)));
                     }
                 }
@@ -1206,10 +1281,9 @@ fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
         generate_peak_table(file_path, &conf.csvs_output_dir_name, testname, order[idx], peaks, &types[idx])?;
 
         let chart_area = chart.plotting_area();
-        let (width, height) = chart_area.dim_in_pixel();
 
         chart_area.draw(&Rectangle::new(
-            [(0.0, y_min), (width as f64, height as f64)],
+            [(f_min, y_min), (f_max, y_max)],
             ShapeStyle::from(&secondary_color).stroke_width(2)
         ))?;
 
@@ -1223,7 +1297,6 @@ fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
 
 
 
-
         root.present()?;
 
     }
@@ -1234,11 +1307,11 @@ fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 fn plotter_imm(file_path: &Path) -> Result<(), Box<dyn Error>> {
+    drm();
     Err(format!("| Warning! | Immunity Plotting not yet implemented. Test: {}", file_path.to_string_lossy()))?
 }
 
 fn plotter_volvo_oscilloscope(file_path: &Path) -> Result<(), Box<dyn Error>> {
-
     let file_path = file_path.to_string_lossy();
     let file_path = &file_path.as_ref();
 
@@ -1297,8 +1370,8 @@ fn plotter_volvo_oscilloscope(file_path: &Path) -> Result<(), Box<dyn Error>> {
     if conf.graph_output_dir_name.is_empty(){panic!()};
     if conf.csvs_output_dir_name.is_empty(){panic!()};
 
-    fs::create_dir_all(file_path.to_string() + "/" + &conf.graph_output_dir_name)?;
-    fs::create_dir_all(file_path.to_string() + "/" + &conf.csvs_output_dir_name)?;
+    //fs::create_dir_all(file_path.to_string() + "/" + &conf.graph_output_dir_name)?;
+    //fs::create_dir_all(file_path.to_string() + "/" + &conf.csvs_output_dir_name)?;
 
     //for each trace make a graphic:
 
@@ -1335,6 +1408,7 @@ fn plotter_volvo_oscilloscope(file_path: &Path) -> Result<(), Box<dyn Error>> {
         .y_max_light_lines(0)
         .x_max_light_lines(0)
         .label_style(TextStyle::from(font_style.clone()).with_color(secondary_color))
+        .x_labels(5)
         .draw()?;
 
         //add crosses
@@ -1382,7 +1456,7 @@ fn plotter_volvo_oscilloscope(file_path: &Path) -> Result<(), Box<dyn Error>> {
 
         //bottom left extra-tickmark
 
-        if !is_power_of_ten(f_min) {
+        if !is_power_of_ten(f_min) || (f_min - 0.1 < 0.0001 && f_max - 0.2 < 0.0001) {
             root.draw(&PathElement::new(
                 vec![(px_left, py_bottom), (px_left, py_bottom + tick_len)],
                 secondary_color,
@@ -1556,10 +1630,9 @@ fn plotter_volvo_oscilloscope(file_path: &Path) -> Result<(), Box<dyn Error>> {
         generate_peak_table(file_path, &conf.csvs_output_dir_name, testname, order[idx], peaks, &types[idx])?;
 
         let chart_area = chart.plotting_area();
-        let (width, height) = chart_area.dim_in_pixel();
 
         chart_area.draw(&Rectangle::new(
-            [(0.0, y_min), (width as f64, height as f64)],
+            [(f_min, y_min), (f_max, y_max)],
             ShapeStyle::from(&secondary_color).stroke_width(2)
         ))?;
 
@@ -1573,7 +1646,7 @@ fn plotter_volvo_oscilloscope(file_path: &Path) -> Result<(), Box<dyn Error>> {
 
 
 
-
+        drm();
         root.present()?;
 
     }
