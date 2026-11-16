@@ -9,8 +9,7 @@ use std::{
     },
     io::{
         Read,
-        Write,
-        stdin
+        Write
     },
     path::{
         self,
@@ -25,6 +24,10 @@ use argon2::{
     password_hash::{phc::PasswordHash, PasswordVerifier},
     Argon2,
 };
+use rpassword::ConfigBuilder;
+
+//self-update:
+use self_update::cargo_crate_version;
 
 use csv::WriterBuilder; //.csv creation
 
@@ -43,7 +46,16 @@ use serde::{Serialize, Deserialize};
 static CONFIG: OnceLock<Config> = OnceLock::new(); //to store config file
 //safety related:
 const PASS_ACTUAL_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$fIpUMMpCyhLhWblxaIhtpg$hcrlizZD/QtXfWJcmrQ9TLmWzyQgWSkHwVzkgUELQQw";
+const SEC_CHECK: bool = true;
 static PASS_USER_ATTEMPT: OnceLock<String> = OnceLock::new();
+static SKIP_PASS: OnceLock<bool> = OnceLock::new();
+
+//self-update
+const REPO_OWNER: &str = "SebastianMolex";
+const REPO_NAME: &str = "stitcher";
+const BIN_NAME: &str = "Plotter";
+const REPO_LINK: &str = "https://github.com/SebastianMolex/stitcher";
+
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Config { //config file data
@@ -178,22 +190,72 @@ fn verify_password(password: &str, stored_hash: &str) -> bool {
         .is_ok()
 }
 
+fn update() -> Result<(), Box<dyn Error>> {
+    let status = self_update::backends::github::Update::configure()
+        .repo_owner(REPO_OWNER)
+        .repo_name(REPO_NAME)
+        .bin_name(BIN_NAME)
+        .show_download_progress(true)
+        .current_version(cargo_crate_version!())
+        .build()?
+        .update()?;
+    println!("Update status: `{}`!", status.version());
+    Ok(())
+}
+
+#[inline(always)]
+fn safety_check() {
+    SKIP_PASS.get_or_init(|| SEC_CHECK);
+}
+
+#[inline(always)]
+fn pass_question() {
+    if let Some(skip_pass) = SKIP_PASS.get() && *skip_pass {return;}
+    println!("| Warning! | This Copy is Password Protected");
+    let pass_conf = ConfigBuilder::new().password_feedback_mask('*').build();
+    let attempt = rpassword::prompt_password_with_config("| Message! | Please enter the password: ", pass_conf);
+    match attempt {
+        Ok(v) => {
+            PASS_USER_ATTEMPT.get_or_init(|| {v});
+        },
+        Err(_) => {
+            println!("| Error! | could not read Password");
+            sleep(Duration::from_secs(5));
+            panic!();
+        },
+    }
+}
+
 #[inline(always)]
 fn drm() {
+    if let Some(skip_pass) = SKIP_PASS.get() && *skip_pass {return;}
     let attempt = PASS_USER_ATTEMPT.get();
-    if let Some(v) = attempt && !verify_password(v.trim(), PASS_ACTUAL_HASH) {
-        println!("| Error! | Password is incorrect");
+    if let Some(v) = attempt{
+        if !verify_password(v.trim(), PASS_ACTUAL_HASH) {
+            println!("| Error! | Password is incorrect");
+            sleep(Duration::from_secs(5));
+            panic!();
+        }
+    } else {
+        println!("| Error! | No Password found");
         sleep(Duration::from_secs(5));
         panic!();
     }
 }
 
 fn main() {
-    println!("| Warning! | This Copy is Password Protected");
-    println!("| Message! | Please enter the password:");
-    let mut attempt = String::new();
-    stdin().read_line(&mut attempt).expect("Failed to read input");
-    PASS_USER_ATTEMPT.get_or_init(|| {attempt});
+    match update() {
+        Ok(_) => {
+            println!("| Message! | Updated Successfully");
+        },
+        Err(_) => {
+            println!("| Error! | Update could not be loaded, please download it manually: {}", REPO_LINK);
+            sleep(Duration::from_secs(5));
+            return;
+        },
+    }
+    safety_check();
+    pass_question();
     drm();
     if !Path::new("config.ini").exists() {//if config doesnt exist, create it
         println!("| Warning! | no config found, generating new config");
@@ -565,96 +627,8 @@ fn get_raw_data_emi(file_path: &str) -> Result<RawData, Box<dyn Error>> { //(Vec
     Ok(RawData { classifiers: output_classifiers, types: output_types, values: output_values })
 }
 
-fn get_raw_data_imm(file_path: &str) -> Result<RawData, Box<dyn Error>> { //(Vec<(Freq Unit: String, Level Unit: String)>, Vec<Vec<(Freq: f64, Level: f64)>>)
+fn _get_raw_data_imm(_file_path: &str) -> Result<RawData, Box<dyn Error>> { //(Vec<(Freq Unit: String, Level Unit: String)>, Vec<Vec<(Freq: f64, Level: f64)>>)
     todo!();
-    let conf = CONFIG.get().ok_or("could not fetch config")?;
-    let mut output_values = vec![];
-    let mut output_types = vec![];
-    let mut output_classifiers = vec![];
-    //if preview results exists, it was an auto-test, else it is a manual test.
-    let text = if Path::new(&(file_path.to_string() + "/" + &conf.test_auto_name)).exists() {
-        read_utf16le_file(&(file_path.to_string() + "/" + &conf.test_auto_name))?
-    } else {
-        read_utf16le_file(&(file_path.to_string() + "/" + &conf.test_manual_name))?
-    };
-
-    let mut is_detector = vec![];
-    let mut prefix_done = false;
-    let mut unit_line = "".to_string(); //since the defining typeline that tells the meaning of this lines comes after if, it has to be stored until that line is encountered
-    let mut classifier_line = "".to_string(); //since the defining typeline that tells the meaning of this lines comes after if, it has to be stored until that line is encountered
-
-    for (row_id, line) in text.lines().enumerate() {
-        if line == "[TableValues]" { //table begins, set flag so the next checks are skipped to save cycles.
-            prefix_done = true;
-            continue;
-        } else if !prefix_done {
-            if line.contains("Unit=") {//remember this line until the type_line is encountered
-                unit_line = line.to_string();
-            } else if line.contains("Name="){
-                classifier_line = line.to_string();
-            } else if line.contains("ColTyp=") {
-                //line that explains unit_lines & classifier_lines meaning encountered, generate output_types now.
-                let types_line_parts: Vec<&str> = line.split(['\t', ' ']).collect();
-                let mut units_line_parts = unit_line.split(['\t', ' ']).skip(1);
-                let mut classifier_line_parts = classifier_line.split(['\t', ' ']).skip(1);
-                let mut freq_unit = "".to_string();
-
-                for part in types_line_parts {
-                    match part {
-                        "Frequency" => {
-                            freq_unit = units_line_parts.next().ok_or("could not fetch frequency unit")?.to_string();
-                        },
-                        "Level" => {
-                            output_types.push((freq_unit.clone(), units_line_parts.next().ok_or("could not fetch level unit")?.to_string()));
-                            output_classifiers.push(classifier_line_parts.next().ok_or("could not fetch classifier")?.to_string());
-                        },
-                        _ => {},
-                    }
-                }
-                //finished generation of types
-            } else if line.contains("Detector=") && !line.contains("Indicate") {
-                //store which table rows are actual detectors in a list.
-                let mut detector_parts: Vec<&str> = line.split(['\t', ' ']).collect();
-                detector_parts.remove(0);
-                for part in detector_parts {
-                    if !part.is_empty() {
-                        is_detector.push(part.parse::<i32>().is_ok_and(|n| n != 0)); // push true if elem is a non-zero number else push false
-                    }
-                }
-            }
-            continue;
-        }
-        //value table handling:
-
-        //read line to output
-        //let line = line.split(['L', 'N', 'V', 'H']).collect::<Vec<_>>().first().unwrap().to_owned(); //Too naive, current probe tests do not have this cuts off when L(1) or N is encountered in the table
-        let mut line_parts: Vec<&str> = line.split(['\t', ' ']).collect();
-        is_detector[0] = true; // re-add frequency-column to be kept
-
-        let mut is_detector_clone = is_detector.clone();
-        line_parts.retain(move |_| is_detector_clone.remove(0)); //remove everything that is not a detector
-
-
-
-        //pre-create vectors
-        if output_values.is_empty() {
-            output_values = vec![Vec::new(); line_parts.len()-1]; //-1 since no extra place for frequency column
-        }
-
-        for i in 1..line_parts.len() {
-            output_values[i-1].push( //-1 so index remains zero index'd despite loop starting at one.
-                match (line_parts[0].parse::<f64>(), line_parts[i].parse::<f64>()) { //--- can still be in the data, indicating a gap in the plot. Mark this via None's
-                    (Ok(freq), Ok(level)) => {(freq, Some(level))}, //nominal value
-                    (Ok(freq), Err(_)) => {(freq, None)}, //gap
-                    _ => {
-                        println!("| Warning! | unexpected value encountered in {}; column: {}; row: {}", file_path, i, row_id);
-                        continue;
-                    } //should probably not happen
-                }
-            );
-        }
-    }
-    Ok(RawData { classifiers: output_classifiers, types: output_types, values: output_values })
 }
 
 fn get_raw_data_volvo_oscilloscope(file_path: &str) -> Result<RawData, Box<dyn Error>> { //(Vec<(Freq Unit: String, Level Unit: String)>, Vec<Vec<(Freq: f64, Level: f64)>>)
@@ -766,50 +740,8 @@ fn get_limits_emi(file_path: &str) -> Result<Vec<Limit>, Box<dyn Error>> {
     Ok(output)
 }
 
-fn get_limits_imm(file_path: &str) -> Result<Vec<Limit>, Box<dyn Error>> {
-    let conf = CONFIG.get().ok_or("could not fetch config")?;
-    todo!();
-    let mut output: Vec<Limit> = vec![];
-
-    let file_paths: Vec<String> = get_files_with_extension(&(file_path.to_string() + "/" + &conf.test_limit_folder), &conf.test_limit_extension)?;
-
-    for (j, file_path) in file_paths.into_iter().enumerate() {
-        let text = read_utf16le_file(&file_path)?;
-        let mut prefix_done = false;
-
-        //get limit type from filename:
-        let name = Path::new(&file_path).file_stem().and_then(|name| name.to_str()).ok_or("could not convert filepath to text")?.to_string();
-
-        output.push(Limit { name, values: vec![] });
-
-        let mut prev_line = "--- ---"; //simulate a gap at the start
-
-        for curr_line in text.lines() {
-            if curr_line == "[TableValues]" {
-                prefix_done = true;
-                continue;
-            } else if !prefix_done {
-                continue;
-            }
-            //read lines to output
-            //i would need a diagramm to explain this algo...
-            //limits are structured so, that they act like a list of coordinates that the path takes. If the path is interrupted a "gap" = ("---", "---") is encountered.
-            //The plotter however requires a list of lines, not a path. In comes this algo:
-            //imagine this algo like a moving group of two pointers (current and previous element) that adds both elements if both elements are not a gap.
-            //this duplicates all elements not after or before a gap aka "Middles" get split into one "End" and one "Start" thus turning a path into a list of lines.
-            //critical, that this algo does nothing if the input happens to already resemble a list of lines aka this algo is idempotent.
-            let curr_line_parts: Vec<&str> = curr_line.split(['\t', ' ']).collect();
-            let prev_line_parts: Vec<&str> = prev_line.split(['\t', ' ']).collect();
-
-            if curr_line_parts[0] != "---" && curr_line_parts[1] != "---" && prev_line_parts[0] != "---" && prev_line_parts[1] != "---" {
-                output[j].values.push((prev_line_parts[0].parse::<f64>()?, prev_line_parts[1].parse::<f64>()?));
-                output[j].values.push((curr_line_parts[0].parse::<f64>()?, curr_line_parts[1].parse::<f64>()?));
-            }
-            prev_line = curr_line;
-        }
-    }
-
-    Ok(output)
+fn _get_limits_imm(_file_path: &str) -> Result<Vec<Limit>, Box<dyn Error>> {
+    todo!()
 }
 
 fn get_limits_volvo_oscilloscope(file_path: &str) -> Result<Vec<Limit>, Box<dyn Error>> {
@@ -905,7 +837,6 @@ fn peak_search_log_linear(data: &[(f64, Option<f64>)], limit: &Limit, limit_star
 }
 
 fn build_color_lists(order: &[&str]) -> Result<(Vec<RGBColor>, Vec<RGBColor>), Box<dyn Error>> {
-    println!("{:?}", order);
     let conf = CONFIG.get().ok_or("could not fetch config")?;
     let mut output1 = vec![];
     let mut output2 = vec![];
@@ -1119,7 +1050,7 @@ fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
 
         //bottom left extra-tickmark
 
-        if !is_power_of_ten(f_min) || (f_min - 0.1 < 0.0001 && f_max - 0.2 < 0.0001) {
+        if !is_power_of_ten(f_min) || (f_min - 0.1 < 0.0001) {
             root.draw(&PathElement::new(
                 vec![(px_left, py_bottom), (px_left, py_bottom + tick_len)],
                 secondary_color,
@@ -1456,7 +1387,7 @@ fn plotter_volvo_oscilloscope(file_path: &Path) -> Result<(), Box<dyn Error>> {
 
         //bottom left extra-tickmark
 
-        if !is_power_of_ten(f_min) || (f_min - 0.1 < 0.0001 && f_max - 0.2 < 0.0001) {
+        if !is_power_of_ten(f_min) || (f_min - 0.1 < 0.0001) {
             root.draw(&PathElement::new(
                 vec![(px_left, py_bottom), (px_left, py_bottom + tick_len)],
                 secondary_color,
@@ -1871,9 +1802,9 @@ fn find_min_max(data: &[Vec<(f64, Option<f64>)>], limits: &[Limit]) -> Option<(f
 }
 
 fn is_power_of_ten(n: f64) -> bool {
-    if n <= 0.0 || !n.is_finite() {
+    if n <= 0.0 {
         return false;
     }
-    let e = n.log10().round() as i32;
-    (n - 10f64.powi(e)).abs() <= 1e-9 * n.max(10f64.powi(e))
+    let log10_x = n.log10();
+    (log10_x - log10_x.round()).abs() < 1e-6
 }
