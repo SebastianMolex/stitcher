@@ -190,7 +190,7 @@ fn verify_password(password: &str, stored_hash: &str) -> bool {
         .is_ok()
 }
 
-fn update() -> Result<self_update::VersionStatus, Box<dyn Error>> {
+fn update() -> Result<VersionStatus, Box<dyn Error>> {
     let status = self_update::backends::github::Update::configure()
         .repo_owner(REPO_OWNER)
         .repo_name(REPO_NAME)
@@ -250,7 +250,7 @@ fn main() {
         Ok(status) => {
             match status {
                 status if status.is_up_to_date() => {
-                    println!("| Message! | Current Version: {} is still up-to-date", status.version());
+                    println!("| Message! | Current Version: v{} is still up-to-date", status.version());
                 },
                 status if status.is_updated() => {
                     println!("| Message! | Updated Successfully to {}", status.version());
