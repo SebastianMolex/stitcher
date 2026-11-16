@@ -27,7 +27,7 @@ use argon2::{
 use rpassword::ConfigBuilder;
 
 //self-update:
-use self_update::cargo_crate_version;
+use self_update::{VersionStatus, cargo_crate_version};
 
 use csv::WriterBuilder; //.csv creation
 
@@ -190,17 +190,18 @@ fn verify_password(password: &str, stored_hash: &str) -> bool {
         .is_ok()
 }
 
-fn update() -> Result<(), Box<dyn Error>> {
+fn update() -> Result<self_update::VersionStatus, Box<dyn Error>> {
     let status = self_update::backends::github::Update::configure()
         .repo_owner(REPO_OWNER)
         .repo_name(REPO_NAME)
         .bin_name(BIN_NAME)
-        .show_download_progress(true)
         .current_version(cargo_crate_version!())
+        .show_output(false)
+        .show_download_progress(false)
+        .no_confirm(true)
         .build()?
         .update()?;
-    println!("Update status: `{}`!", status.version());
-    Ok(())
+    Ok(status)
 }
 
 #[inline(always)]
@@ -244,13 +245,22 @@ fn drm() {
 }
 
 fn main() {
+    println!("| Message! | Looking for updates...");
     match update() {
-        Ok(_) => {
-            println!("| Message! | Updated Successfully");
+        Ok(status) => {
+            match status {
+                status if status.is_up_to_date() => {
+                    println!("| Message! | Current Version: {} is still up-to-date", status.version());
+                },
+                status if status.is_updated() => {
+                    println!("| Message! | Updated Successfully to {}", status.version());
+                },
+                _ => {}
+            }
         },
         Err(_) => {
-            println!("| Error! | Update could not be loaded, please download it manually: {}", REPO_LINK);
-            sleep(Duration::from_secs(5));
+            println!("| Error! | Update could not be loaded, please download it manually from: {}", REPO_LINK);
+            sleep(Duration::from_secs(10));
             return;
         },
     }
