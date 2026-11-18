@@ -1,3 +1,9 @@
+//cargo build --release
+//cargo run --release -p stamper -- target\release\plotter.exe
+//carefull, this uses the stamper copied into this target\release and not the one in tools\stamper\release so need to manually copy after compiling that.
+//cargo run --release -p stamper -- target\release\plotter.exe --tamper-hash to test wrong-hash
+//cargo run --release -p stamper -- target\release\plotter.exe --tamper-body to test for actual manipulation
+//after body polution: cargo clean -p stitcher
 use std::{
     cmp::Ordering,
     error::Error,
@@ -16,18 +22,20 @@ use std::{
         PathBuf,
         Path
     },
-    sync::OnceLock
+    sync::OnceLock,
+    env,
+    process
 };
 
 //security:
-use argon2::{
-    password_hash::{phc::PasswordHash, PasswordVerifier},
-    Argon2,
-};
+use argon2::Argon2;
 use rpassword::ConfigBuilder;
+use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce, aead::Aead};
+use hkdf::Hkdf;
+use sha2::Sha256;
 
 //self-update:
-use self_update::{VersionStatus, cargo_crate_version};
+use self_update::{VersionStatus, cargo_crate_version, restart::restart};
 
 use csv::WriterBuilder; //.csv creation
 
@@ -45,15 +53,18 @@ use serde::{Serialize, Deserialize};
 
 static CONFIG: OnceLock<Config> = OnceLock::new(); //to store config file
 //safety related:
-const PASS_ACTUAL_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$fIpUMMpCyhLhWblxaIhtpg$hcrlizZD/QtXfWJcmrQ9TLmWzyQgWSkHwVzkgUELQQw";
-const SEC_CHECK: bool = true;
-static PASS_USER_ATTEMPT: OnceLock<String> = OnceLock::new();
-static SKIP_PASS: OnceLock<bool> = OnceLock::new();
+//Abandon all hope, all ye who enter. I am nice enough to specify that this is not a password hash, but an encrypted "blob".
+//Hint: it WILL take longer to break than just coding this entire program from scratch, enjoy!
+static SKIP_PASS: bool = false;
+const NONCE_LEN: usize = 12;
+const PASSWORD_HASH_LEN: usize = 32;
+const TAG_LEN: usize = 16;
+const PAYLOAD_LEN: usize = NONCE_LEN + PASSWORD_HASH_LEN + TAG_LEN;
 
 //self-update
 const REPO_OWNER: &str = "SebastianMolex";
 const REPO_NAME: &str = "stitcher";
-const BIN_NAME: &str = "Plotter";
+const BIN_NAME: &str = "plotter";
 const REPO_LINK: &str = "https://github.com/SebastianMolex/stitcher";
 
 
@@ -180,14 +191,10 @@ struct Test {
     path: PathBuf,
 }
 
-fn verify_password(password: &str, stored_hash: &str) -> bool {
-    let parsed_hash = match PasswordHash::new(stored_hash) {
-        Ok(h) => h,
-        Err(_) => return false,
-    };
-    Argon2::default()
-        .verify_password(password.as_bytes(), &parsed_hash)
-        .is_ok()
+#[repr(C)]
+struct SelfHashBlock {
+    magic: [u8; 8],
+    hash: [u8; PAYLOAD_LEN],
 }
 
 fn update() -> Result<VersionStatus, Box<dyn Error>> {
@@ -199,48 +206,129 @@ fn update() -> Result<VersionStatus, Box<dyn Error>> {
         .show_output(false)
         .show_download_progress(false)
         .no_confirm(true)
-        .build()?
-        .update()?;
+        .build().unwrap()
+        .update().unwrap();
     Ok(status)
 }
 
+const SALT: &[u8; 16] = b"!!useless_salt!!"; // its in the binary... so it cant be secret anyways, but argon2 needs a fixed salt for the method to work.
+
+const M_COST: u32 = 65536;  // 64 MiB
+const T_COST: u32 = 2;
+const P_COST: u32 = 1;
+
+fn argon2_params() -> argon2::Params {
+    argon2::Params::new(M_COST, T_COST, P_COST, None).unwrap()
+}
+
+#[used]
+#[unsafe(no_mangle)]
+static SELF_HASH_BLOCK: SelfHashBlock = SelfHashBlock {
+    magic: *b"SELFHASH",
+    hash: [0u8; PAYLOAD_LEN],
+};
+
 #[inline(always)]
-fn safety_check() {
-    SKIP_PASS.get_or_init(|| SEC_CHECK);
+fn verify_self() -> Result<(), Box<dyn Error>> {
+    let exe_path = env::current_exe()?;
+    let mut data = fs::read(&exe_path)?;
+
+    // Take the magic from the static so the literal isn't duplicated in code
+    let magic: [u8; 8] =
+        unsafe { std::ptr::read_volatile(&SELF_HASH_BLOCK.magic) };
+
+    // Require exactly one match
+    let mut matches = data.windows(8).enumerate().filter(|(_, w)| *w == magic);
+    let (pos, _) = matches.next().ok_or("hash region not found")?;
+    if matches.next().is_some() {
+        return Err("ambiguous hash region".into());
+    }
+
+    let hash_offset = pos + 8;
+    let hash_blob: [u8; PAYLOAD_LEN] = data[hash_offset..hash_offset + PAYLOAD_LEN].try_into()?;
+
+    if hash_blob == [0u8; PAYLOAD_LEN] {
+        println!("| Error! | This Program has not been stamped, please consult the Developer.");
+        sleep(Duration::from_secs(5));
+        process::exit(1);
+    }
+
+    data[hash_offset..hash_offset + PAYLOAD_LEN].fill(0);
+
+    let mut computed = [0u8; 32];
+    Argon2::new(
+        argon2::Algorithm::Argon2id,
+        argon2::Version::V0x13,
+        argon2_params(),
+    )
+    .hash_password_into(&data, SALT, &mut computed)
+    .map_err(|e| e.to_string())?;
+
+    let input = pass_question();
+
+    if let Some(io) = input {
+
+        let mut pass_hash = [0u8; 32];
+        Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, argon2_params())
+            .hash_password_into(io.as_bytes(), SALT, &mut pass_hash)
+            .expect("argon2 hash failed");
+
+        let key = derive_key_from_hash(&computed);
+        let hash_compare = decrypt_payload(&key, &hash_blob);
+
+        let hash_compare = match hash_compare {
+            Some(hash) => hash,
+            None => {
+                println!("| Error! | Integrity check failed: binary has been modified");
+                sleep(Duration::from_secs(5));
+                process::exit(1);
+            }
+        };
+
+
+        if hash_compare != pass_hash {
+            println!("| Error! | Password is incorrect");
+            sleep(Duration::from_secs(5));
+            process::exit(1);
+        }
+    }
+
+    Ok(())
 }
 
 #[inline(always)]
-fn pass_question() {
-    if let Some(skip_pass) = SKIP_PASS.get() && *skip_pass {return;}
+fn decrypt_payload(key: &[u8; 32], payload: &[u8; PAYLOAD_LEN]) -> Option<[u8; 32]> {
+    let nonce: [u8; NONCE_LEN] = payload[..NONCE_LEN].try_into().unwrap();
+    let nonce = Nonce::from(nonce);
+    let ciphertext = &payload[NONCE_LEN..];
+    let cipher = ChaCha20Poly1305::new(key.into());
+    let plaintext = cipher.decrypt(&nonce, ciphertext).unwrap();//.ok()?;
+    plaintext.try_into().ok()
+}
+
+#[inline(always)]
+fn derive_key_from_hash(hash: &[u8; 32]) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::new(None, hash);
+    let mut key = [0u8; 32];
+    hk.expand(b"20261118", &mut key).expect("HKDF expand failed"); //first one just has to be unique in the programs using this, so why not a vague timestamp?
+    key
+}
+
+#[inline(always)]
+fn pass_question() -> Option<String> {
+    if SKIP_PASS {return None;}
     println!("| Warning! | This Copy is Password Protected");
     let pass_conf = ConfigBuilder::new().password_feedback_mask('*').build();
     let attempt = rpassword::prompt_password_with_config("| Message! | Please enter the password: ", pass_conf);
     match attempt {
         Ok(v) => {
-            PASS_USER_ATTEMPT.get_or_init(|| {v});
+            Some(v.trim().to_string()) //why not just return attempt.ok()? easy, then an error would be like skipping the password, but thats no good!
         },
         Err(_) => {
             println!("| Error! | could not read Password");
             sleep(Duration::from_secs(5));
-            panic!();
+            process::exit(1);
         },
-    }
-}
-
-#[inline(always)]
-fn drm() {
-    if let Some(skip_pass) = SKIP_PASS.get() && *skip_pass {return;}
-    let attempt = PASS_USER_ATTEMPT.get();
-    if let Some(v) = attempt{
-        if !verify_password(v.trim(), PASS_ACTUAL_HASH) {
-            println!("| Error! | Password is incorrect");
-            sleep(Duration::from_secs(5));
-            panic!();
-        }
-    } else {
-        println!("| Error! | No Password found");
-        sleep(Duration::from_secs(5));
-        panic!();
     }
 }
 
@@ -254,6 +342,10 @@ fn main() {
                 },
                 status if status.is_updated() => {
                     println!("| Message! | Updated Successfully to {}", status.version());
+                    println!("| Message! | Restarting with newest version...");
+                    sleep(Duration::from_secs(5));
+                    restart().unwrap_err();
+                    unreachable!()
                 },
                 _ => {}
             }
@@ -264,9 +356,11 @@ fn main() {
             return;
         },
     }
-    safety_check();
-    pass_question();
-    drm();
+    if verify_self().is_err() {
+        println!("| Error! | Integrity check failed: binary has been modified");
+        sleep(Duration::from_secs(5));
+        process::exit(1);
+    }
     if !Path::new("config.ini").exists() {//if config doesnt exist, create it
         println!("| Warning! | no config found, generating new config");
         match create_new_ini() {
@@ -282,7 +376,6 @@ fn main() {
     }
     println!("| Message! | loading config...");
     get_config(); //loads config to global static
-    drm();
     let conf = match CONFIG.get() {
         Some(v) => {v},
         None => {
@@ -303,7 +396,6 @@ fn main() {
             return;
         },
     };
-    drm();
     match search_for_all_test_paths(&path, &mut tests_to_plot) { //finds all types of tests
         Ok(_) => {println!("| Message! | all plots scanned, begin plotting...");},
         Err(_) => {
@@ -321,8 +413,6 @@ fn main() {
                     Ok(_) => {},
                     Err(_) => {
                         println!("| Error! | could not generate EMI graph for {}", dir.to_string_lossy());
-                        sleep(Duration::from_secs(5));
-                        return;
                     },
                 }
             },
@@ -331,8 +421,6 @@ fn main() {
                     Ok(_) => {},
                     Err(_) => {
                         println!("| Error! | could not generate Imm graph for {}", dir.to_string_lossy());
-                        sleep(Duration::from_secs(5));
-                        return;
                     },
                 }
             },
@@ -341,8 +429,6 @@ fn main() {
                     Ok(_) => {},
                     Err(_) => {
                         println!("| Error! | could not generate Oscilloscope graph for {}", dir.to_string_lossy());
-                        sleep(Duration::from_secs(5));
-                        return;
                     },
                 }
             },
@@ -360,7 +446,7 @@ fn get_config() -> &'static Config {
             Err(_) => {
                 println!("| Error! | could not load config into global context");
                 sleep(Duration::from_secs(5));
-                panic!();
+                process::exit(1);
             },
         };
         match serde_ini::from_str(&content){
@@ -368,7 +454,7 @@ fn get_config() -> &'static Config {
             Err(_) => {
                 println!("| Error! | could not parse config");
                 sleep(Duration::from_secs(5));
-                panic!();
+                process::exit(1);
             },
 
         }
@@ -520,7 +606,7 @@ fn search_for_all_test_paths(base_dir: &PathBuf, result: &mut Vec<Test>) -> Resu
                                 Err(_) => {
                                     println!("| Error! | Insufficient Read permissions for {}", check_path.to_string_lossy());
                                     sleep(Duration::from_secs(5));
-                                    panic!();
+                                    process::exit(1);
                                 },
                             }
 
@@ -665,12 +751,12 @@ fn get_raw_data_volvo_oscilloscope(file_path: &str) -> Result<RawData, Box<dyn E
                 } else {
                     println!("| Error! | Header file does not match format: {}", file_path.to_string() + "/" + &conf.test_oscilloscope_prefix + &column_id.to_string() + &conf.test_oscilloscope_middle + div + &conf.test_oscilloscope_suffix + ".csv");
                     sleep(Duration::from_secs(5));
-                    panic!();
+                    process::exit(1);
                 }
             } else {
                 println!("| Error! | Header file does not match format: {}", file_path.to_string() + "/" + &conf.test_oscilloscope_prefix + &column_id.to_string() + &conf.test_oscilloscope_middle + div + &conf.test_oscilloscope_suffix + ".csv");
                 sleep(Duration::from_secs(5));
-                panic!();
+                process::exit(1);
             };
             if did == 0 {
                 output_types.push(("s".to_string(), y_unit)); //too hard linked to value to extract string to config easily
@@ -869,7 +955,7 @@ fn build_color_lists(order: &[&str]) -> Result<(Vec<RGBColor>, Vec<RGBColor>), B
                 output1.push(hex_to_rgb(&conf.graph_color_1)?);
                 output2.push(hex_to_rgb(&conf.limit_color_pk)?);
             },
-            _ => {panic!("Found item that matches no pattern")},
+            _ => {process::exit(1);}, //"Found item that matches no pattern"
         }
     }
 
@@ -878,7 +964,6 @@ fn build_color_lists(order: &[&str]) -> Result<(Vec<RGBColor>, Vec<RGBColor>), B
 }
 
 fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
-    drm();
     let file_path = file_path.to_string_lossy();
     let file_path = &file_path.as_ref();
 
@@ -931,7 +1016,7 @@ fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
     //build color order:
     let (color_list_plots, color_list_limits) = build_color_lists(&order)?;
 
-    if raw_data.len() > color_list_plots.len() + 1 {panic!()};
+    if raw_data.len() > color_list_plots.len() + 1 {process::exit(1);};
 
     let freqs_plot: Vec<f64> = raw_data[0].iter().map(|(first, _)| first.to_owned()).collect();
 
@@ -948,8 +1033,8 @@ fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
     let font_style = (conf.style_general_type.as_str(), conf.style_general_size).into_font();
     let font_style_marker = (conf.style_marker_type.as_str(), conf.style_marker_size).into_font();
 
-    if conf.graph_output_dir_name.is_empty(){panic!()};
-    if conf.csvs_output_dir_name.is_empty(){panic!()};
+    if conf.graph_output_dir_name.is_empty(){process::exit(1);};
+    if conf.csvs_output_dir_name.is_empty(){process::exit(1);};
 
     //fs::create_dir_all(file_path.to_string() + "/" + &conf.graph_output_dir_name)?;
     //fs::create_dir_all(file_path.to_string() + "/" + &conf.csvs_output_dir_name)?;
@@ -1248,7 +1333,6 @@ fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 fn plotter_imm(file_path: &Path) -> Result<(), Box<dyn Error>> {
-    drm();
     Err(format!("| Warning! | Immunity Plotting not yet implemented. Test: {}", file_path.to_string_lossy()))?
 }
 
@@ -1286,7 +1370,7 @@ fn plotter_volvo_oscilloscope(file_path: &Path) -> Result<(), Box<dyn Error>> {
         ];
     let color_limit = hex_to_rgb(&conf.limit_color_pk)?;
 
-    if raw_data.len() > colors_plot.len() + 1 {panic!()};
+    if raw_data.len() > colors_plot.len() + 1 {process::exit(1);};
 
     let lin_len = limits[0].values.len();
     let log_len = limits[1].values.len();
@@ -1308,8 +1392,8 @@ fn plotter_volvo_oscilloscope(file_path: &Path) -> Result<(), Box<dyn Error>> {
     let font_style = (conf.style_general_type.as_str(), conf.style_general_size).into_font();
     let font_style_marker = (conf.style_marker_type.as_str(), conf.style_marker_size).into_font();
 
-    if conf.graph_output_dir_name.is_empty(){panic!()};
-    if conf.csvs_output_dir_name.is_empty(){panic!()};
+    if conf.graph_output_dir_name.is_empty(){process::exit(1);};
+    if conf.csvs_output_dir_name.is_empty(){process::exit(1);};
 
     //fs::create_dir_all(file_path.to_string() + "/" + &conf.graph_output_dir_name)?;
     //fs::create_dir_all(file_path.to_string() + "/" + &conf.csvs_output_dir_name)?;
@@ -1585,9 +1669,6 @@ fn plotter_volvo_oscilloscope(file_path: &Path) -> Result<(), Box<dyn Error>> {
             .background_style(bg_color)
             .draw()?;
 
-
-
-        drm();
         root.present()?;
 
     }
@@ -1628,7 +1709,7 @@ fn crawl_up_to_tests(file_path: &str, dir_name: &str, test_name: &str, specifier
                     None => {
                         println!("| Error! | could not read folder name during crawl");
                         sleep(Duration::from_secs(5));
-                        panic!();
+                        process::exit(1);
                     },
                 };
                 if name == "Tests"{
@@ -1763,7 +1844,7 @@ fn get_files_with_extension(dir_path: &str, extension: &str) -> Result<Vec<Strin
             None => {
                 println!("| Error! | could not convert filename to text");
                 sleep(Duration::from_secs(5));
-                panic!();
+                process::exit(1);
             },
         }
     ).collect();
