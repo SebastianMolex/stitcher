@@ -230,6 +230,7 @@ static SELF_HASH_BLOCK: SelfHashBlock = SelfHashBlock {
 
 #[inline(always)]
 fn verify_self() -> Result<(), Box<dyn Error>> {
+    if SKIP_PASS {return Ok(());}
     let exe_path = env::current_exe()?;
     let mut data = fs::read(&exe_path)?;
 
@@ -264,34 +265,32 @@ fn verify_self() -> Result<(), Box<dyn Error>> {
     .hash_password_into(&data, SALT, &mut computed)
     .map_err(|e| e.to_string())?;
 
-    let input = pass_question();
+    let io = pass_question();
 
-    if let Some(io) = input {
+    let mut pass_hash = [0u8; 32];
+    Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, argon2_params())
+        .hash_password_into(io.as_bytes(), SALT, &mut pass_hash)
+        .expect("argon2 hash failed");
 
-        let mut pass_hash = [0u8; 32];
-        Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, argon2_params())
-            .hash_password_into(io.as_bytes(), SALT, &mut pass_hash)
-            .expect("argon2 hash failed");
+    let key = derive_key_from_hash(&computed);
+    let hash_compare = decrypt_payload(&key, &hash_blob);
 
-        let key = derive_key_from_hash(&computed);
-        let hash_compare = decrypt_payload(&key, &hash_blob);
-
-        let hash_compare = match hash_compare {
-            Some(hash) => hash,
-            None => {
-                println!("| Error! | Integrity check failed: binary has been modified");
-                sleep(Duration::from_secs(5));
-                process::exit(1);
-            }
-        };
-
-
-        if hash_compare != pass_hash {
-            println!("| Error! | Password is incorrect");
+    let hash_compare = match hash_compare {
+        Some(hash) => hash,
+        None => {
+            println!("| Error! | Integrity check failed: binary has been modified");
             sleep(Duration::from_secs(5));
             process::exit(1);
         }
+    };
+
+
+    if hash_compare != pass_hash {
+        println!("| Error! | Password is incorrect");
+        sleep(Duration::from_secs(5));
+        process::exit(1);
     }
+
 
     Ok(())
 }
@@ -315,14 +314,13 @@ fn derive_key_from_hash(hash: &[u8; 32]) -> [u8; 32] {
 }
 
 #[inline(always)]
-fn pass_question() -> Option<String> {
-    if SKIP_PASS {return None;}
+fn pass_question() -> String {
     println!("| Warning! | This Copy is Password Protected");
     let pass_conf = ConfigBuilder::new().password_feedback_mask('*').build();
     let attempt = rpassword::prompt_password_with_config("| Message! | Please enter the password: ", pass_conf);
     match attempt {
         Ok(v) => {
-            Some(v.trim().to_string()) //why not just return attempt.ok()? easy, then an error would be like skipping the password, but thats no good!
+            v.trim().to_string() //why not just return attempt.ok()? easy, then an error would be like skipping the password, but thats no good!
         },
         Err(_) => {
             println!("| Error! | could not read Password");
@@ -932,35 +930,46 @@ fn peak_search_log_linear(data: &[(f64, Option<f64>)], limit: &Limit, limit_star
         }) //returns none if no value ever breaks the limit
 }
 
-fn build_color_lists(order: &[&str]) -> Result<(Vec<RGBColor>, Vec<RGBColor>), Box<dyn Error>> {
+fn build_color_lists(order: &[&str], limits: &[Limit]) -> Result<(Vec<RGBColor>, Vec<RGBColor>), Box<dyn Error>> {
     let conf = CONFIG.get().ok_or("could not fetch config")?;
-    let mut output1 = vec![];
-    let mut output2 = vec![];
+    let mut color_list_plots = vec![];
+    let mut color_list_limits = vec![];
 
     for &item in order {
         match item {
-            v if *v == conf.test_identifier_additional_baselevel => {
-                output1.push(hex_to_rgb(&conf.graph_color_4)?);
-                output2.push(hex_to_rgb(&conf.limit_color_baselevel)?);
-            },
             v if *v == conf.test_identifier_quasipeak => {
-                output1.push(hex_to_rgb(&conf.graph_color_3)?);
-                output2.push(hex_to_rgb(&conf.limit_color_qp)?);
+                color_list_plots.push(hex_to_rgb(&conf.graph_color_3)?);
             },
             v if *v == conf.test_identifier_average => {
-                output1.push(hex_to_rgb(&conf.graph_color_2)?);
-                output2.push(hex_to_rgb(&conf.limit_color_av)?);
+                color_list_plots.push(hex_to_rgb(&conf.graph_color_2)?);
             },
             v if *v == conf.test_identifier_peak => {
-                output1.push(hex_to_rgb(&conf.graph_color_1)?);
-                output2.push(hex_to_rgb(&conf.limit_color_pk)?);
+                color_list_plots.push(hex_to_rgb(&conf.graph_color_1)?);
+            },
+            _ => {process::exit(1);}, //"Found item that matches no pattern"
+        }
+    }
+
+    for limit in limits {
+        match limit {
+            v if v.name.contains(&conf.test_identifier_additional_baselevel) => {
+                color_list_limits.push(hex_to_rgb(&conf.limit_color_baselevel)?);
+            },
+            v if v.name.contains(&conf.test_identifier_quasipeak) => {
+                color_list_limits.push(hex_to_rgb(&conf.limit_color_qp)?);
+            },
+            v if v.name.contains(&conf.test_identifier_average) => {
+                color_list_limits.push(hex_to_rgb(&conf.limit_color_av)?);
+            },
+            v if v.name.contains(&conf.test_identifier_peak) => {
+                color_list_limits.push(hex_to_rgb(&conf.limit_color_pk)?);
             },
             _ => {process::exit(1);}, //"Found item that matches no pattern"
         }
     }
 
 
-    Ok((output1, output2))
+    Ok((color_list_plots, color_list_limits))
 }
 
 fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
@@ -1014,7 +1023,7 @@ fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
 
 
     //build color order:
-    let (color_list_plots, color_list_limits) = build_color_lists(&order)?;
+    let (color_list_plots, color_list_limits) = build_color_lists(&order, &limits)?;
 
     if raw_data.len() > color_list_plots.len() + 1 {process::exit(1);};
 
@@ -1193,7 +1202,7 @@ fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
 
         let mut peaks: Vec<Peak> = vec![];
 
-        for lim in limits.iter() { //for each limit
+        for (lidx, lim) in limits.iter().enumerate() { //for each limit
             let limit_name = &lim.name;
             let limit = &lim.values;
             if limit_name.contains(order[idx]) { //check if the limit_name should be plotted
@@ -1209,10 +1218,10 @@ fn plotter_emi(file_path: &Path) -> Result<(), Box<dyn Error>> {
                     }
 
                     //plot each limit chunk(breaks if the limit pair format start<->finish is broken):
-                    let temp = chart.draw_series(LineSeries::new(vec![limit[2*i], limit[2*i+1]], color_list_limits[idx].stroke_width(3)))?;
+                    let temp = chart.draw_series(LineSeries::new(vec![limit[2*i], limit[2*i+1]], color_list_limits[lidx].stroke_width(3)))?;
                     if i == 0 {
                         //and add it to the legend once
-                        let color_clone = color_list_limits[idx];
+                        let color_clone = color_list_limits[lidx];
                         temp.label(limit_name).legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color_clone.stroke_width(3)));
                     }
                 }
